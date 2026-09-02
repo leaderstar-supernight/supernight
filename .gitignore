@@ -1,0 +1,32 @@
+# Local Python environments
+.venv/
+venv/
+env/
+
+# Python/Jupyter generated files
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local credentials and private configuration
+.env
+.env.*
+config/*.yaml
+!config/*.example.yaml
+
+# Generated reports, caches, and validation ledgers
+reports/
+Stock_price_prediction/reports/
+
+# Excel temporary lock files
+~$*.xlsx
+~$*.xlsm
+
+# macOS / Windows local metadata
+.DS_Store
+Thumbs.db
+desktop.ini
+

@@ -1,0 +1,68 @@
+# 獨立美股第二階段；不引用台股設定或 FinMind。
+data:
+  years: 5
+  benchmark: SPY
+  cutoff_hour_new_york: 18       # 保守等待常規收盤資料，不使用盤前盤後
+  cache_hours: 12
+  max_price_age_days: 5
+  allow_recent_reference: true # 最新日缺值時顯示有日期的歷史參考，不產生最新交易建議
+  max_reference_gap_sessions: 2 # 最多回看2個供應商交易日期，仍受max_price_age_days限制
+candidates:
+  report_path: null             # 搜尋專案 reports 中最新 US 報表
+  tickers: []
+  max_stocks: null
+  max_whid_age_days: 14
+  holdings_path: null           # CSV：代號,股數,平均成本；成本為USD，可有分數股
+rules:
+  short_fast_ma: 5
+  short_slow_ma: 20
+  short_slope_days: 3
+  fast_ma: 20
+  slow_ma: 60
+  slope_days: 5
+  long_fast_ma: 120
+  long_slow_ma: 240
+  long_slope_days: 20
+  volume_ratio_min: 1.0
+  max_extension: 0.10
+  max_atr_pct: 0.06
+  min_daily_turnover_usd: 20000000
+  flow_days: 20
+  cmf_positive: 0.05
+  require_flow_for_entry: true
+  require_market_for_entry: true
+  atr_stop_multiple: 2.0
+ai:
+  enabled: true
+  models: [logistic, xgboost, lstm]
+  ensemble_models: [logistic, xgboost] # LSTM先作挑戰模型，通過樣本外驗證後才加入集成
+  horizon: 10
+  up_atr: 1.5
+  down_atr: 1.0
+  sequence_length: 60
+  min_train: 252
+  calibration_size: 252 # 盤整類較少，以一年交易日校準避免短窗樣本不足
+  validation_size: 63
+  final_test: 126
+  min_class_count: 10
+  seed: 42
+  lstm_hidden: 32
+  lstm_dropout: 0.20
+  lstm_learning_rate: 0.001
+  lstm_epochs: 40
+  lstm_batch_size: 64
+  lstm_patience: 5
+  lstm_validation_size: 42
+  lstm_walk_forward: false # 避免每個滾動區間重訓；仍執行最終測試與最新模型
+backtest:
+  enabled: true
+  initial_cash: 100000          # USD；單檔研究，不是多檔投資組合資金
+  fee_rate: 0.0005             # 每邊5bps成本預留，並非任何券商的實際費率
+  sell_fee_rate: 0.0001        # 賣出额外1bps成本預留，不是法定稅率
+  slippage: 0.001
+  max_holding_sessions: 20
+  stop_loss: 0.08
+  take_profit: 0.15
+  evaluation_sessions: 252
+output:
+  root: ../reports/stage2_US

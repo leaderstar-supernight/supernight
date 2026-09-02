@@ -1,0 +1,5 @@
+# Copy this file to Fin.yaml on each machine if legacy notebooks still reference it.
+finmind:
+  enabled: true
+  token: "YOUR_FINMIND_TOKEN"
+

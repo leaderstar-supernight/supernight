@@ -1,0 +1,5 @@
+# Copy this file to TW.yaml on each machine and fill in local credentials.
+finmind:
+  enabled: true
+  token: "YOUR_FINMIND_TOKEN"
+

@@ -1,0 +1,3 @@
+# Copy this file to US.yaml on each machine if the first-stage US notebook needs local settings.
+# Keep real account tokens, API keys, and machine-specific paths out of Git.
+
