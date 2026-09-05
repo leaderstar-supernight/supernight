@@ -32,6 +32,15 @@ rules:
   require_flow_for_entry: true
   require_market_for_entry: true
   atr_stop_multiple: 2.0
+sentiment:
+  enabled: true
+  news_enabled: true
+  news_count: 20
+  news_min_articles: 2
+  news_positive_threshold: 0.15
+  news_negative_threshold: -0.15
+  vix_symbol: ^VIX
+  # 市場／個股／新聞情緒目前只供研究，不參與建議、回測或AI特徵。
 ai:
   enabled: true
   models: [logistic, xgboost, lstm]

@@ -3,30 +3,31 @@
 venv/
 env/
 
-# Python/Jupyter generated files
-__pycache__/
+# Generated Python and Jupyter files
+**/__pycache__/
+**/.ipynb_checkpoints/
 *.py[cod]
-.ipynb_checkpoints/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 
-# Local credentials and private configuration
+# Generated reports, caches, executed notebooks, and validation ledger
+/reports/
+/Stock_price_prediction/reports/
+/Stock_price_prediction/docx_render_check/
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Real local configuration may contain credentials
 .env
 .env.*
-config/*.yaml
-!config/*.example.yaml
+/config/*.yaml
+!/config/*.example.yaml
 
-# Generated reports, caches, and validation ledgers
-reports/
-Stock_price_prediction/reports/
-
-# Excel temporary lock files
+# Office and operating-system temporary files
 ~$*.xlsx
 ~$*.xlsm
-
-# macOS / Windows local metadata
+~$*.docx
 .DS_Store
 Thumbs.db
 desktop.ini
-

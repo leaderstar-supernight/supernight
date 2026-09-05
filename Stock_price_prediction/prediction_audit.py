@@ -74,6 +74,12 @@ def connect(db_path=DB_PATH):
         return_5 REAL,
         return_10 REAL,
         return_20 REAL,
+        benchmark_return_5 REAL,
+        benchmark_return_10 REAL,
+        benchmark_return_20 REAL,
+        abnormal_return_5 REAL,
+        abnormal_return_10 REAL,
+        abnormal_return_20 REAL,
         return_60 REAL,
         return_126 REAL,
         return_252 REAL,
@@ -91,7 +97,9 @@ def connect(db_path=DB_PATH):
     );
     ''')
     existing = {row[1] for row in connection.execute('PRAGMA table_info(indicators)')}
-    for column in ['return_60', 'return_126', 'return_252']:
+    for column in ['return_60', 'return_126', 'return_252',
+                   'benchmark_return_5','benchmark_return_10','benchmark_return_20',
+                   'abnormal_return_5','abnormal_return_10','abnormal_return_20']:
         if column not in existing:
             connection.execute(f'ALTER TABLE indicators ADD COLUMN {column} REAL')
     connection.commit()
@@ -205,17 +213,19 @@ def _provider_prices(market, ticker):
     if market == 'TW':
         from timing_data import Provider, load_config
         cfg = load_config(BASE / 'config' / 'timing_TW.yaml')
-        raw, adjusted, _, _ = Provider(cfg).bundle(ticker)
+        provider=Provider(cfg)
+        raw, adjusted, _, _ = provider.bundle(ticker)
+        benchmark=provider.prices('TaiwanStockPrice','TAIEX')
     else:
         from timing_us_data import Provider, load_config
         cfg = load_config(BASE / 'config' / 'timing_US.yaml')
-        raw, adjusted, _, _ = Provider(cfg).bundle(ticker)
+        raw, adjusted, benchmark, _ = Provider(cfg).bundle(ticker)
     if raw is None or adjusted is None:
         raise RuntimeError('原始價或還原價不可用')
-    return raw.sort_index(), adjusted.sort_index()
+    return raw.sort_index(), adjusted.sort_index(), benchmark.sort_index() if benchmark is not None else None
 
 
-def _outcome(raw, adjusted, signal_date, horizon, upper, lower):
+def _outcome(raw, adjusted, signal_date, horizon, upper, lower, benchmark=None):
     signal_date = pd.Timestamp(signal_date)
     future_raw = raw.loc[raw.index > signal_date].head(max(252, horizon))
     if len(future_raw) < horizon:
@@ -235,15 +245,29 @@ def _outcome(raw, adjusted, signal_date, horizon, upper, lower):
     base = float(signal_adjusted.Close.iloc[-1])
     def forward_return(days):
         return (float(future_adjusted.Close.iloc[days - 1]) / base - 1) if len(future_adjusted) >= days else None
+    benchmark_base=None
+    if benchmark is not None:
+        prior=benchmark.loc[benchmark.index<=signal_date,'Close'].dropna()
+        benchmark_base=float(prior.iloc[-1]) if len(prior) else None
+    def benchmark_return(days):
+        if benchmark_base is None or len(future_adjusted)<days:return None
+        target=future_adjusted.index[days-1]
+        observed=benchmark.loc[(benchmark.index>signal_date)&(benchmark.index<=target),'Close'].dropna()
+        return float(observed.iloc[-1])/benchmark_base-1 if len(observed) else None
+    stock_returns={d:forward_return(d) for d in [5,10,20,60,126,252]}
+    benchmark_returns={d:benchmark_return(d) for d in [5,10,20]}
     signal_raw = raw.loc[raw.index <= signal_date]
     raw_base = float(signal_raw.Close.iloc[-1]) if not signal_raw.empty else np.nan
     ten = future_raw.head(horizon)
     return {
         'actual_class': actual, 'maturity_date': str(ten.index[-1].date()),
-        'return_5': forward_return(5), 'return_10': forward_return(10),
-        'return_20': forward_return(20),
-        'return_60': forward_return(60), 'return_126': forward_return(126),
-        'return_252': forward_return(252),
+        'return_5':stock_returns[5], 'return_10':stock_returns[10], 'return_20':stock_returns[20],
+        'benchmark_return_5':benchmark_returns[5], 'benchmark_return_10':benchmark_returns[10],
+        'benchmark_return_20':benchmark_returns[20],
+        'abnormal_return_5':stock_returns[5]-benchmark_returns[5] if stock_returns[5] is not None and benchmark_returns[5] is not None else None,
+        'abnormal_return_10':stock_returns[10]-benchmark_returns[10] if stock_returns[10] is not None and benchmark_returns[10] is not None else None,
+        'abnormal_return_20':stock_returns[20]-benchmark_returns[20] if stock_returns[20] is not None and benchmark_returns[20] is not None else None,
+        'return_60':stock_returns[60], 'return_126':stock_returns[126], 'return_252':stock_returns[252],
         'max_up_10': float(ten.High.max() / raw_base - 1) if np.isfinite(raw_base) else None,
         'max_down_10': float(ten.Low.min() / raw_base - 1) if np.isfinite(raw_base) else None,
     }
@@ -254,7 +278,7 @@ def settle_pending(db_path=DB_PATH):
     forecasts = pd.read_sql_query(
         "SELECT * FROM forecasts WHERE settlement_status='pending'", connection)
     indicators = pd.read_sql_query(
-        "SELECT * FROM indicators WHERE settlement_status='pending' OR return_252 IS NULL", connection)
+        "SELECT * FROM indicators WHERE settlement_status='pending' OR return_252 IS NULL OR abnormal_return_10 IS NULL", connection)
     keys = sorted(set(zip(forecasts.market, forecasts.ticker)) |
                   set(zip(indicators.market, indicators.ticker)))
     settled_forecasts = settled_indicators = enriched_indicators = 0
@@ -262,14 +286,14 @@ def settle_pending(db_path=DB_PATH):
     now = datetime.now(timezone.utc).isoformat()
     for market, ticker in keys:
         try:
-            raw, adjusted = _provider_prices(market, ticker)
+            raw, adjusted, benchmark = _provider_prices(market, ticker)
         except Exception as exc:
             errors.append(f'{market}/{ticker}: {type(exc).__name__}: {str(exc)[:140]}')
             continue
         subset = forecasts.loc[(forecasts.market == market) & (forecasts.ticker == ticker)]
         for _, row in subset.iterrows():
             result = _outcome(raw, adjusted, row.signal_date, int(row.horizon),
-                              float(row.upper_barrier), float(row.lower_barrier))
+                              float(row.upper_barrier), float(row.lower_barrier), benchmark)
             if result is None:
                 continue
             connection.execute('''UPDATE forecasts SET actual_class=?,maturity_date=?,settled_utc=?,
@@ -284,21 +308,26 @@ def settle_pending(db_path=DB_PATH):
                     WHERE market=? AND ticker=? AND signal_date=?''', (market, ticker, row.signal_date))
                 continue
             result = _outcome(raw, adjusted, row.signal_date, int(row.horizon),
-                              float(row.upper_barrier), float(row.lower_barrier))
+                              float(row.upper_barrier), float(row.lower_barrier), benchmark)
             if result is None:
                 continue
             connection.execute('''UPDATE indicators SET actual_class=?,maturity_date=?,return_5=?,return_10=?,
-                return_20=?,return_60=?,return_126=?,return_252=?,max_up_10=?,max_down_10=?,
+                return_20=?,benchmark_return_5=?,benchmark_return_10=?,benchmark_return_20=?,
+                abnormal_return_5=?,abnormal_return_10=?,abnormal_return_20=?,
+                return_60=?,return_126=?,return_252=?,max_up_10=?,max_down_10=?,
                 settled_utc=?,settlement_status='settled'
                 WHERE market=? AND ticker=? AND signal_date=?''',
                 (result['actual_class'], result['maturity_date'], result['return_5'], result['return_10'],
-                 result['return_20'], result['return_60'], result['return_126'], result['return_252'],
+                 result['return_20'],result['benchmark_return_5'],result['benchmark_return_10'],result['benchmark_return_20'],
+                 result['abnormal_return_5'],result['abnormal_return_10'],result['abnormal_return_20'],
+                 result['return_60'], result['return_126'], result['return_252'],
                  result['max_up_10'], result['max_down_10'], now,
                  market, ticker, row.signal_date))
             if row.settlement_status == 'pending':
                 settled_indicators += 1
             elif any(pd.isna(row.get(column)) and result[column] is not None
-                     for column in ['return_20', 'return_60', 'return_126', 'return_252']):
+                     for column in ['return_20','return_60','return_126','return_252',
+                                    'benchmark_return_10','abnormal_return_10']):
                 enriched_indicators += 1
     connection.execute('INSERT INTO audit_runs VALUES (?,?,?,?)', (
         now, 'settle', 'ok' if not errors else 'partial', json.dumps({
@@ -364,14 +393,17 @@ def _ai_tables(frame):
     return pd.DataFrame(rows), pd.DataFrame(calibration)
 
 
-POSITIVE = ('買進', '強買', '偏多', '多頭', '偏強', '正向', '安全', '優良', '增加', '成長')
-NEGATIVE = ('賣出', '減碼', '偏空', '空頭', '轉弱', '偏弱', '危險', '過熱', '衰退')
-CATEGORY_HINTS = ('短期趨勢', '中期趨勢', '長期趨勢', '籌碼', '量價參考', '市場環境', '風險',
+POSITIVE = ('買進', '強買', '偏多', '多頭', '偏強', '正向', '安全', '優良', '增加', '成長', '低')
+NEGATIVE = ('賣出', '減碼', '偏空', '空頭', '轉弱', '偏弱', '危險', '過熱', '衰退', '高')
+CATEGORY_HINTS = ('短期趨勢', '中期趨勢', '長期趨勢', '籌碼', '量價參考', '市場環境', '市場情緒',
+                  '個股情緒', '新聞情緒', '融資壓力', '風險',
                   '未持有建議', '基本面投資建議', '買價投資建議', '盈餘投資建議',
                   '護城河', '財務安全性', '獲利品質')
 NUMBER_HINTS = ('歷史估值百分位', '成長分數', '品質分數', '巴菲特檢核分數', '基本面分數',
                 'RSI', 'ATR比例', 'CMF', '籌碼K線分數', '投入資本報酬率', '股東權益報酬率',
-                '自由現金流殖利率')
+                '自由現金流殖利率', '市場情緒分數', '個股情緒分數', '新聞情緒分數',
+                '融資限額使用率', '融資餘額近N日變化率', '大盤融資近5日變化率',
+                '大盤融資近20日變化率', 'VIX', 'SPY近20日報酬率', '相對SPY20日報酬差')
 
 
 def _expected_sign(value):
@@ -387,6 +419,10 @@ def _evaluation_target(column):
     name = str(column)
     if name.startswith('WHID_'):
         return 'return_126', '126交易日'
+    if '市場情緒' in name:
+        return 'benchmark_return_10', '市場10交易日'
+    if any(token in name for token in ['個股情緒','新聞情緒','融資壓力','融資限額使用率','融資餘額近N日變化率']):
+        return 'abnormal_return_10', '相對市場10交易日'
     if '短期趨勢' in name:
         return 'return_5', '5交易日'
     if '長期趨勢' in name:
@@ -400,6 +436,8 @@ def _indicator_tables(frame):
     from scipy.stats import spearmanr
     snapshots = pd.DataFrame([json.loads(value) for value in frame.snapshot_json])
     outcome = frame[['market', 'ticker', 'signal_date', 'return_5', 'return_10', 'return_20',
+                     'benchmark_return_5','benchmark_return_10','benchmark_return_20',
+                     'abnormal_return_5','abnormal_return_10','abnormal_return_20',
                      'return_60', 'return_126', 'return_252', 'actual_class',
                      'max_up_10', 'max_down_10']].reset_index(drop=True)
     snapshots = snapshots.reset_index(drop=True)

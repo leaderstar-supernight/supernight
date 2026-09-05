@@ -36,6 +36,17 @@ rules:
   branch_top_n: 5
   branch_pressure_threshold: 0.02
   atr_stop_multiple: 2.0
+sentiment:
+  enabled: true
+  news_enabled: true
+  news_count: 20
+  news_min_articles: 2
+  news_positive_threshold: 0.15
+  news_negative_threshold: -0.15
+  market_history_days: 365
+  margin_pressure_growth: 0.05
+  margin_utilization_high: 0.60
+  # 市場／個股／新聞情緒與融資壓力目前只供研究，不參與建議、回測或AI特徵。
 ai:
   enabled: true
   models: [logistic, xgboost, lstm]

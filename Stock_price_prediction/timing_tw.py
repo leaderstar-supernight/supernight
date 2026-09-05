@@ -9,10 +9,10 @@ import numpy as np
 import pandas as pd
 
 from timing_data import (VERSION, Provider, candidates, load_config, number, read_holdings)
-from timing_rules import signals, latest_assessment, compare_strategies
+from timing_rules import signals, latest_assessment, compare_strategies, market_sentiment, news_sentiment
 from timing_ai import run_ai
 
-SIMPLE_COLUMNS=['代號','訊號日期','現價','短期趨勢','中期趨勢','長期趨勢','籌碼','籌碼K線','風險','未持有建議','持有情境建議',
+SIMPLE_COLUMNS=['代號','訊號日期','現價','短期趨勢','中期趨勢','長期趨勢','籌碼','籌碼K線','市場情緒','個股情緒','融資壓力','新聞情緒','風險','未持有建議','持有情境建議',
     'ATR風險參考價','支撐參考','壓力參考','AI上行先觸機率','AI下行先觸機率','AI盤整機率','AI狀態','資料狀態']
 
 
@@ -45,10 +45,12 @@ def export_reports(result, cfg):
     paths={kind:root/kind/datetime.now().strftime('%Y/%m') for kind in ['詳細版','簡化版','研究資料']}
     for p in paths.values(): p.mkdir(parents=True,exist_ok=True)
     simple=paths['簡化版']/(run_id+'_簡化.xlsx'); detailed=paths['詳細版']/(run_id+'_詳細.xlsx')
-    rules=[{'分類':g,'設定':k,'值':v} for g in ['rules','ai','backtest'] for k,v in cfg[g].items()]
+    rules=[{'分類':g,'設定':k,'值':v} for g in ['rules','sentiment','ai','backtest'] for k,v in cfg[g].items()]
     rules.extend([
         {'分類':'說明','設定':'趨勢分層','值':'短期5/20/3、中期20/60/5、長期120/240/20；只有中期趨勢參與現行進出場與回測'},
         {'分類':'說明','設定':'籌碼K線','值':'法人、自營商、融資融券、借券與可用的券商分點形成獨立結論；目前未參與交易建議'},
+        {'分類':'說明','設定':'市場／個股／新聞情緒','值':'透明規則的研究參考，保存每日輸入供後續驗證；目前不參與交易建議、回測或AI特徵'},
+        {'分類':'限制','設定':'融資維持率','值':'公開資料無法還原投資人帳戶擔保品與負債，因此只顯示個股與大盤融資壓力，不冒充實際維持率'},
         {'分類':'限制','設定':'券商分點','值':'FinMind sponsor限定；無權限時自動降級，主要買超分點均價不是CMoney主力成本'},
         {'分類':'說明','設定':'AI目標','值':'未來10個交易日先觸及上方1.5倍ATR、下方1.0倍ATR，或期間內兩者皆未觸及；同日雙觸採下方'},
         {'分類':'限制','設定':'AI決策','值':'所有AI機率只作研究參考，未用於交易建議；LSTM為挑戰模型，不加入正式集成'},
@@ -62,6 +64,7 @@ def export_reports(result, cfg):
     sheets={'Report':result['detail'],'DataStatus':result['data_status'],'Backtest':result['backtest'],
         'Trades':result['trades'],'Equity':result['equity'],'AILatest':result['ai_latest'],
         'AIMetrics':result['ai_metrics'],'AICalibration':result['ai_calibration'],'AIStatus':result['ai_status'],
+        'News':result['news'],'MarketContext':result['market_context'],
         'Rules':pd.DataFrame(rules),'CandidateSource':pd.DataFrame([result['provenance']]),
         'Candidates':result['candidates']}
     # This is the program's reusable export function, not a change to any existing workbook.
@@ -89,15 +92,20 @@ def export_reports(result, cfg):
     if not result['ai_predictions'].empty:
         result['ai_predictions'].to_csv(paths['研究資料']/(run_id+'_ai_oos.csv'),index=False,encoding='utf-8-sig')
     result['signals'].to_csv(paths['研究資料']/(run_id+'_signals.csv'),index=False,encoding='utf-8-sig')
+    if not result['news'].empty:
+        result['news'].to_csv(paths['研究資料']/(run_id+'_news.csv'),index=False,encoding='utf-8-sig')
     return {'簡化版':str(simple),'詳細版':str(detailed),'快照':str(snapshot)}
 
 
-def analyze_bundle(ticker, candidate, raw, adjusted, chips, meta, cfg, provenance, asof, holding=None):
+def analyze_bundle(ticker, candidate, raw, adjusted, chips, meta, cfg, provenance, asof, holding=None,
+                   market_summary=None, news_summary=None):
     x=signals(raw,adjusted,chips,cfg)
     row=latest_assessment(ticker,raw,adjusted,x,cfg,provenance,asof,holding)
     for col,value in candidate.items():
         if col!='代號': row['WHID_'+col]=value
     row.update(meta)
+    row.update(market_summary or {})
+    row.update(news_summary or {})
     stale=(pd.Timestamp(asof).normalize()-raw.index[-1]).days>cfg['data']['max_price_age_days']
     if stale:
         ai={'latest':pd.DataFrame(),'metrics':pd.DataFrame(),'calibration':pd.DataFrame(),
@@ -119,7 +127,7 @@ def analyze_bundle(ticker, candidate, raw, adjusted, chips, meta, cfg, provenanc
         '借券記錄數':len(chips.attrs.get('lending',[])),'券商分點記錄數':len(chips.attrs.get('branches',[])),
         '最後行情日':str(raw.index[-1].date()),'最後籌碼可用':bool(x.chip_ready.iloc[-1]),
         '回測狀態':'已產出單檔研究比較' if not b.empty else '停用／資料不足'}
-    signal=x[['technical_entry','entry','exit','chip_ready','margin_ready','margin_overheat','lending_ready','lending_high',
+    signal=x[['technical_entry','entry','exit','chip_ready','margin_ready','margin_overheat','margin_utilization','lending_ready','lending_high',
               'branch_ready','branch_positive','branch_negative','chip_kline_score','short_trend_up','short_trend_down',
               'medium_trend_up','medium_trend_down','long_trend_up','long_trend_down','trend_up','risk_ok']].copy()
     signal.index.name='date'; signal=signal.reset_index(); signal.insert(0,'代號',ticker)
@@ -136,14 +144,24 @@ def run(config_path='config/timing_TW.yaml', provider=None, candidate_frame=None
     provenance.setdefault('第二階段執行日期台北',str(getattr(provider,'report_check_date',provider.asof).date()))
     provenance.setdefault('WHID日期比較規則','以台北日曆日比較WHID報表日期；不與最後交易日比較')
     holdings=read_holdings(cfg['candidates'].get('holdings_path'))
+    market_summary=market_sentiment(None,cfg)
+    if cfg['sentiment']['enabled'] and hasattr(provider,'market_context'):
+        try:market_summary=market_sentiment(provider.market_context(),cfg)
+        except Exception as exc:market_summary['市場情緒資料狀態']='資料不足：'+type(exc).__name__
     buckets={k:[] for k in ['detail','data_status','ai_latest','ai_metrics','ai_calibration','ai_predictions',
-                            'ai_status','backtest','trades','equity','signals']}
+                            'ai_status','backtest','trades','equity','signals','news']}
     for i,candidate in enumerate(candidate_frame.to_dict('records'),1):
         ticker=candidate['代號']
         if progress: progress(f'[{i}/{len(candidate_frame)}] {ticker}：資料、規則、AI研究與回測')
         try:
+            news_summary,scored_news=news_sentiment(None,ticker,provider.asof,cfg)
+            if cfg['sentiment']['enabled'] and hasattr(provider,'news'):
+                try:news_summary,scored_news=news_sentiment(provider.news(ticker),ticker,provider.asof,cfg)
+                except Exception as exc:news_summary['新聞資料狀態']='資料不足：'+type(exc).__name__
+            if not scored_news.empty:buckets['news'].append(scored_news)
             raw,adjusted,chips,meta=provider.bundle(ticker)
-            row,source,ai,b,t,e,s=analyze_bundle(ticker,candidate,raw,adjusted,chips,meta,cfg,provenance,provider.asof,holdings.get(ticker))
+            row,source,ai,b,t,e,s=analyze_bundle(ticker,candidate,raw,adjusted,chips,meta,cfg,provenance,provider.asof,
+                holdings.get(ticker),market_summary,news_summary)
             buckets['detail'].append(pd.DataFrame([row])); buckets['data_status'].append(pd.DataFrame([source]))
             for key,df in [('ai_latest',ai['latest']),('ai_metrics',ai['metrics']),('ai_calibration',ai['calibration']),
                 ('ai_predictions',ai['predictions']),('backtest',b),('trades',t),('equity',e)]:
@@ -160,6 +178,7 @@ def run(config_path='config/timing_TW.yaml', provider=None, candidate_frame=None
             if progress: progress(f'{ticker} 未完成：{type(exc).__name__}；已保留失敗列')
     result={k:pd.concat(v,ignore_index=True) if v else pd.DataFrame() for k,v in buckets.items()}
     result['simple']=result['detail'].reindex(columns=SIMPLE_COLUMNS)
+    result['market_context']=pd.DataFrame([market_summary])
     result['candidates']=candidate_frame.copy();result['provenance']=provenance
     if write: result['paths']=export_reports(result,cfg)
     return result

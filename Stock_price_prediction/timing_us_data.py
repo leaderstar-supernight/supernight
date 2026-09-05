@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
-VERSION='US-timing-1.4'
+VERSION='US-timing-1.5'
 NY=ZoneInfo('America/New_York')
 TAIPEI=ZoneInfo('Asia/Taipei')
 
@@ -38,6 +38,15 @@ def load_config(path):
     for g,k in [('candidates','report_path'),('candidates','holdings_path'),('output','root')]:
         if c[g].get(k):c[g][k]=str((path.parent/c[g][k]).resolve())
     c['_config_path']=str(path)
+    c.setdefault('sentiment',{})
+    s=c['sentiment']
+    defaults={'enabled':True,'news_enabled':True,'news_count':20,'news_min_articles':2,
+              'news_positive_threshold':0.15,'news_negative_threshold':-0.15,
+              'vix_symbol':'^VIX'}
+    for key,value in defaults.items():s.setdefault(key,value)
+    if not isinstance(s['enabled'],bool) or not isinstance(s['news_enabled'],bool):raise ValueError('情緒研究開關須為布林值')
+    if int(s['news_count'])<1 or int(s['news_min_articles'])<1:raise ValueError('新聞篇數設定錯誤')
+    if not -1<s['news_negative_threshold']<s['news_positive_threshold']<1:raise ValueError('新聞情緒門檻設定錯誤')
     r,a,b=c['rules'],c['ai'],c['backtest']
     for k in ['short_fast_ma','short_slow_ma','short_slope_days','fast_ma','slow_ma','slope_days',
               'long_fast_ma','long_slow_ma','long_slope_days','flow_days']:
@@ -243,3 +252,43 @@ class Provider:
               '機構籌碼狀態':'未使用13F；季度持股不當作每日買賣超',
               '還原價格狀態':'可用' if adjusted is not None else '缺還原價格，AI及回測停用'}
         return raw,adjusted,benchmark,meta
+
+    def market_context(self):
+        """Yahoo SPY/VIX market context. FINRA margin is monthly and is not treated as daily data."""
+        benchmark_raw,_=self.history(self.config['data']['benchmark'])
+        context={'benchmark':adjusted_from_raw(benchmark_raw),'vix':pd.DataFrame(),
+                 'meta':{'市場情緒資料來源':'Yahoo SPY＋CBOE VIX行情（Yahoo轉載）',
+                         '美股個股融資維持率':'無公開逐股等價資料',
+                         'FINRA融資資料':'僅月度市場總額，未混入每日情緒分數'}}
+        try:
+            import yfinance as yf
+            f=yf.Ticker(str(self.config['sentiment']['vix_symbol'])).history(
+                start=self.start,end=(self.asof+pd.Timedelta(days=1)).strftime('%Y-%m-%d'),
+                auto_adjust=False,actions=False,prepost=False)
+            context['vix']=clean_prices(f).loc[:self.asof]
+            context['meta']['市場情緒資料狀態']='可用'
+        except Exception as exc:
+            context['meta']['市場情緒資料狀態']='VIX資料不足：'+type(exc).__name__
+        return context
+
+    def news(self,ticker):
+        if not self.config['sentiment']['news_enabled']:return pd.DataFrame()
+        ticker=symbol(ticker)
+        try:
+            import yfinance as yf
+            items=yf.Ticker(ticker).get_news(count=int(self.config['sentiment']['news_count']),tab='all') or []
+        except Exception as exc:
+            raise RuntimeError('Yahoo新聞: '+type(exc).__name__) from None
+        rows=[];retrieved=datetime.now(timezone.utc).isoformat()
+        for item in items:
+            content=item.get('content',item) if isinstance(item,dict) else {}
+            provider=content.get('provider') or {}
+            canonical=content.get('canonicalUrl') or content.get('clickThroughUrl') or {}
+            rows.append({'代號':ticker,'新聞ID':content.get('id') or item.get('id'),
+                         '發布時間UTC':content.get('pubDate') or content.get('providerPublishTime'),
+                         '來源':provider.get('displayName') if isinstance(provider,dict) else provider,
+                         '標題':content.get('title'),'摘要':content.get('summary') or content.get('description'),
+                         '網址':canonical.get('url') if isinstance(canonical,dict) else canonical,
+                         '相關代號':content.get('relatedTickers') or item.get('relatedTickers'),
+                         '取得時間UTC':retrieved,'新聞資料源':'Yahoo Finance'})
+        return pd.DataFrame(rows).drop_duplicates(subset=['新聞ID','標題'],keep='first') if rows else pd.DataFrame()

@@ -191,10 +191,7 @@ def _base_model(model_name, cfg, input_size):
         return make_pipeline(StandardScaler(), LogisticRegression(
             C=.1, max_iter=1500, class_weight='balanced', random_state=int(cfg['seed'])))
     if model_name == 'xgboost':
-        try:
-            from xgboost import XGBClassifier
-        except Exception as exc:
-            raise ImportError('XGBoost需要可載入的OpenMP runtime；macOS可安裝libomp，或暫時移除xgboost模型') from exc
+        from xgboost import XGBClassifier
         return XGBClassifier(
             n_estimators=120, max_depth=2, min_child_weight=10, learning_rate=.03,
             subsample=.8, colsample_bytree=.8, objective='multi:softprob',

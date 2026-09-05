@@ -95,10 +95,20 @@ def latest_assessment(ticker,raw,adjusted,x,cfg,provenance,asof,holding=None):
         if not bool(last[f'{prefix}_trend_ready']):return '資料不足'
         return '多頭' if bool(last[f'{prefix}_trend_up']) else ('轉弱' if bool(last[f'{prefix}_trend_down']) else '整理')
     short_trend=trend_text('short');medium_trend=trend_text('medium');long_trend=trend_text('long')
+    stock_score=50.
+    if bool(last.flow_positive):stock_score+=20
+    elif bool(last.flow_negative):stock_score-=20
+    if medium_trend=='多頭':stock_score+=15
+    elif medium_trend=='轉弱':stock_score-=15
+    if pd.notna(last.relative_return_20):stock_score+=10 if last.relative_return_20>0 else -10
+    stock_score=float(np.clip(stock_score,0,100)) if bool(last.flow_ready) else np.nan
+    stock_sentiment='資料不足' if pd.isna(stock_score) else ('偏多' if stock_score>=65 else ('偏空' if stock_score<=35 else '中性'))
     row={'代號':ticker,'訊號日期NY':str(day.date()),'現價USD':close,
         '趨勢':medium_trend,'短期趨勢':short_trend,'中期趨勢':medium_trend,'長期趨勢':long_trend,
         '量價參考':'資料不足' if not last.flow_ready else ('偏強' if last.flow_positive else ('偏弱' if last.flow_negative else '分歧／中性')),
         '市場環境':'資料不足' if not last.market_ready else ('偏多' if last.market_up else ('偏弱' if last.market_down else '整理')),
+        '個股情緒':stock_sentiment,'個股情緒分數':stock_score,
+        '個股情緒形成依據':'CMF／帶方向成交量＋中期趨勢＋相對SPY20日報酬；研究參考，不參與交易建議',
         '風險':'／'.join(risks) or '未觸發風險門檻','未持有建議':advice,'持有情境建議':held,
         'ATR風險參考價USD':stop if stop>0 else np.nan,'支撐參考USD':last.support/factor,'壓力參考USD':last.resistance/factor,
         '資料狀態':'；'.join(notes) or '可用；研究規則未驗證獲利','WHID評估日期':whid,
@@ -111,6 +121,67 @@ def latest_assessment(ticker,raw,adjusted,x,cfg,provenance,asof,holding=None):
         qty,cost=holding['股數'],holding['平均成本']
         row.update({'持股資料':'已提供','股數':qty,'平均成本USD':cost,'未實現損益USD':qty*(close-cost),'成本報酬率':close/cost-1})
     return row
+
+
+POSITIVE_WORDS=('beat','beats','upgrade','upgraded','growth','surge','record','profit','profits','raise','raises',
+                'strong','outperform','buyback','dividend','approval','win','wins')
+NEGATIVE_WORDS=('miss','misses','downgrade','downgraded','decline','drop','loss','losses','cut','cuts','warning',
+                'lawsuit','probe','recall','fraud','weak','underperform')
+
+
+def news_sentiment(news,ticker,asof,cfg):
+    base={'新聞情緒':'資料不足','新聞情緒分數':np.nan,'新聞篇數':0,'新聞正面篇數':0,
+          '新聞負面篇數':0,'新聞中性篇數':0,'新聞資料狀態':'無可用新聞',
+          '新聞情緒用途':'研究參考；不參與交易建議或AI特徵'}
+    if news is None or news.empty:return base,pd.DataFrame()
+    f=news.copy();scores=[];labels=[]
+    for rec in f.to_dict('records'):
+        text=(str(rec.get('標題') or '')+' '+str(rec.get('摘要') or '')).lower()
+        pos=sum(text.count(w) for w in POSITIVE_WORDS);neg=sum(text.count(w) for w in NEGATIVE_WORDS)
+        score=(pos-neg)/max(1,pos+neg);scores.append(float(score));labels.append('正面' if score>0 else ('負面' if score<0 else '中性'))
+    f['新聞情緒分數']=scores;f['新聞情緒標籤']=labels
+    def related(value):
+        if isinstance(value,(list,tuple,set)):values=[str(v).upper() for v in value]
+        elif value is None or (isinstance(value,float) and pd.isna(value)):values=[]
+        else:values=[s.strip().upper() for s in str(value).replace('[','').replace(']','').replace("'",'').split(',') if s.strip()]
+        return not values or ticker.upper() in values
+    f['與個股直接相關']=f.get('相關代號',pd.Series([None]*len(f),index=f.index)).map(related)
+    used=f.loc[f['與個股直接相關']].copy()
+    if used.empty:used=f
+    score=float(used['新聞情緒分數'].mean());minimum=int(cfg['sentiment']['news_min_articles'])
+    used_labels=used['新聞情緒標籤'].tolist()
+    label='資料不足' if len(used)<minimum else ('偏多' if score>=cfg['sentiment']['news_positive_threshold'] else
+          ('偏空' if score<=cfg['sentiment']['news_negative_threshold'] else '中性'))
+    base.update({'新聞情緒':label,'新聞情緒分數':score,'新聞篇數':len(used),'新聞取得總篇數':len(f),
+                 '新聞正面篇數':used_labels.count('正面'),'新聞負面篇數':used_labels.count('負面'),
+                 '新聞中性篇數':used_labels.count('中性'),
+                 '新聞資料狀態':'可用；僅標題／摘要字典基準，尚未證明對報酬有預測力'})
+    return base,f
+
+
+def market_sentiment(context,cfg):
+    result={'市場情緒':'資料不足','市場情緒分數':np.nan,'SPY近20日報酬率':np.nan,
+            'SPY相對60日線':np.nan,'VIX':np.nan,'VIX近20日變化率':np.nan,
+            '市場情緒用途':'研究參考；不參與交易建議或AI特徵'}
+    if not context:return result
+    benchmark=context.get('benchmark');vix=context.get('vix')
+    if benchmark is None or benchmark.empty:return {**result,**context.get('meta',{})}
+    close=benchmark.Close.dropna();ret20=close.pct_change(20,fill_method=None).iloc[-1] if len(close)>20 else np.nan
+    ma60=close.rolling(60).mean().iloc[-1] if len(close)>=60 else np.nan
+    distance=close.iloc[-1]/ma60-1 if pd.notna(ma60) else np.nan
+    vix_now=vix_change=np.nan
+    if vix is not None and not vix.empty:
+        vc=vix.Close.dropna();vix_now=float(vc.iloc[-1]) if len(vc) else np.nan
+        if len(vc)>20:vix_change=vc.iloc[-1]/vc.iloc[-21]-1
+    score=50
+    if pd.notna(ret20):score+=15 if ret20>0 else -15
+    if pd.notna(distance):score+=15 if distance>0 else -15
+    if pd.notna(vix_now):score+=10 if vix_now<20 else (-15 if vix_now>=30 else 0)
+    if pd.notna(vix_change) and vix_change>=0.20:score-=10
+    score=float(np.clip(score,0,100));label='偏多' if score>=65 else ('偏空' if score<=35 else '中性')
+    result.update({'市場情緒':label,'市場情緒分數':score,'SPY近20日報酬率':ret20,
+                   'SPY相對60日線':distance,'VIX':vix_now,'VIX近20日變化率':vix_change})
+    result.update(context.get('meta',{}));return result
 
 
 def compare_strategies(raw,adjusted,x,cfg,benchmark=None):

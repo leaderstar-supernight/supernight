@@ -12,7 +12,7 @@ import pandas as pd
 import requests
 import yaml
 
-VERSION = 'TW-timing-1.4'
+VERSION = 'TW-timing-1.5'
 TW_ZONE = timezone(timedelta(hours=8))
 
 
@@ -42,6 +42,21 @@ def load_config(path):
         if c[group].get(key):
             c[group][key] = str((path.parent / c[group][key]).resolve())
     c['_config_path'] = str(path)
+    c.setdefault('sentiment', {})
+    s=c['sentiment']
+    defaults={'enabled':True,'news_enabled':True,'news_count':20,'news_min_articles':2,
+              'news_positive_threshold':0.15,'news_negative_threshold':-0.15,
+              'market_history_days':365,'margin_pressure_growth':0.05,
+              'margin_utilization_high':0.60}
+    for key,value in defaults.items():s.setdefault(key,value)
+    if not isinstance(s['enabled'],bool) or not isinstance(s['news_enabled'],bool):
+        raise ValueError('情緒研究開關須為布林值')
+    if int(s['news_count'])<1 or int(s['news_min_articles'])<1 or int(s['market_history_days'])<90:
+        raise ValueError('情緒研究篇數或歷史期間設定錯誤')
+    if not -1<s['news_negative_threshold']<s['news_positive_threshold']<1:
+        raise ValueError('新聞情緒門檻設定錯誤')
+    if not 0<s['margin_pressure_growth']<1 or not 0<s['margin_utilization_high']<=1:
+        raise ValueError('融資壓力門檻設定錯誤')
     r, a, b = c['rules'], c['ai'], c['backtest']
     for key in ['short_fast_ma','short_slow_ma','short_slope_days','fast_ma','slow_ma','slope_days',
                 'long_fast_ma','long_slow_ma','long_slope_days','chip_days','chip_history_days','branch_top_n']:
@@ -181,9 +196,10 @@ class Provider:
         self._branch_unavailable_reason=None
         if not self._token: raise ValueError('現有 FinMind 設定未啟用或缺少金鑰')
 
-    def fetch(self, dataset, code, start_date=None, end_date=None):
-        params = {'dataset': dataset, 'data_id': code, 'start_date': start_date or self.start,
+    def fetch(self, dataset, code=None, start_date=None, end_date=None):
+        params = {'dataset': dataset, 'start_date': start_date or self.start,
                   'end_date': end_date or self.asof.strftime('%Y-%m-%d')}
+        if code is not None: params['data_id']=code
         key = hashlib.sha256(json.dumps(params, sort_keys=True).encode()).hexdigest()[:24]
         path = self.cache / (key + '.json')
         if path.exists() and (datetime.now().timestamp() - path.stat().st_mtime) < self.config['data']['cache_hours']*3600:
@@ -238,6 +254,44 @@ class Provider:
         f = f.rename(columns={'open':'Open','max':'High','min':'Low','close':'Close',
                               'Trading_Volume':'Volume','Trading_money':'Turnover'})
         return clean_prices(f.set_index('date')).loc[:self.asof]
+
+    def market_context(self):
+        """Return public market inputs once per run; never infer an account maintenance ratio."""
+        days=int(self.config['sentiment']['market_history_days'])
+        start=(self.asof-pd.Timedelta(days=days)).strftime('%Y-%m-%d')
+        context={'index':pd.DataFrame(),'margin':pd.DataFrame(),
+                 'meta':{'市場情緒資料來源':'FinMind TAIEX＋TaiwanStockTotalMarginPurchaseShortSale',
+                         '大盤融資維持率':'未提供；公開資料無法還原投資人帳戶擔保品與負債'}}
+        errors=[]
+        try: context['index']=self.prices('TaiwanStockPrice','TAIEX').loc[start:]
+        except Exception as exc: errors.append('TAIEX '+(str(exc) if isinstance(exc,RuntimeError) else type(exc).__name__))
+        try: context['margin']=self.fetch('TaiwanStockTotalMarginPurchaseShortSale',None,start_date=start)
+        except Exception as exc: errors.append('大盤融資 '+(str(exc) if isinstance(exc,RuntimeError) else type(exc).__name__))
+        context['meta']['市場情緒資料狀態']='可用' if not errors else '部分資料不足：'+'；'.join(errors)
+        return context
+
+    def news(self,ticker):
+        """Fetch recent Yahoo headlines for archiving; failure never blocks price analysis."""
+        if not self.config['sentiment']['news_enabled']:return pd.DataFrame()
+        ticker=symbol(ticker)
+        try:
+            import yfinance as yf
+            items=yf.Ticker(ticker).get_news(count=int(self.config['sentiment']['news_count']),tab='all') or []
+        except Exception as exc:
+            raise RuntimeError('Yahoo新聞: '+type(exc).__name__) from None
+        rows=[];retrieved=datetime.now(timezone.utc).isoformat()
+        for item in items:
+            content=item.get('content',item) if isinstance(item,dict) else {}
+            provider=content.get('provider') or {}
+            canonical=content.get('canonicalUrl') or content.get('clickThroughUrl') or {}
+            rows.append({'代號':ticker,'新聞ID':content.get('id') or item.get('id'),
+                         '發布時間UTC':content.get('pubDate') or content.get('providerPublishTime'),
+                         '來源':provider.get('displayName') if isinstance(provider,dict) else provider,
+                         '標題':content.get('title'),'摘要':content.get('summary') or content.get('description'),
+                         '網址':canonical.get('url') if isinstance(canonical,dict) else canonical,
+                         '相關代號':content.get('relatedTickers') or item.get('relatedTickers'),
+                         '取得時間UTC':retrieved,'新聞資料源':'Yahoo Finance'})
+        return pd.DataFrame(rows).drop_duplicates(subset=['新聞ID','標題'],keep='first') if rows else pd.DataFrame()
 
     def bundle(self, ticker):
         ticker = symbol(ticker); code = ticker.split('.')[0]

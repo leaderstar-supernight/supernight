@@ -93,7 +93,7 @@ def chip_features(records, raw, rules):
 
 def margin_features(frame,raw,rules):
     out=pd.DataFrame(index=raw.index)
-    for col in ['margin_balance','short_balance','margin_growth','short_growth','short_margin_ratio']:
+    for col in ['margin_balance','short_balance','margin_growth','short_growth','short_margin_ratio','margin_utilization']:
         out[col]=np.nan
     out['margin_ready']=False;out['margin_overheat']=False
     required={'date','MarginPurchaseTodayBalance','ShortSaleTodayBalance'}
@@ -108,6 +108,9 @@ def margin_features(frame,raw,rules):
     out['margin_growth']=margin.shift(lag)/margin.shift(lag+n).replace(0,np.nan)-1
     out['short_growth']=short.shift(lag)/short.shift(lag+n).replace(0,np.nan)-1
     out['short_margin_ratio']=short.shift(lag)/margin.shift(lag).replace(0,np.nan)
+    if 'MarginPurchaseLimit' in f:
+        limit=pd.to_numeric(f.MarginPurchaseLimit,errors='coerce')
+        out['margin_utilization']=margin.shift(lag)/limit.shift(lag).replace(0,np.nan)
     price_growth=raw.Close.shift(lag)/raw.Close.shift(lag+n)-1
     out['margin_ready']=out[['margin_balance','short_balance','margin_growth']].notna().all(axis=1)
     out['margin_overheat']=out.margin_ready&(out.margin_growth>=rules['margin_overheat_growth'])&(price_growth>0)
@@ -250,10 +253,25 @@ def latest_assessment(ticker, raw, adjusted, x, cfg, provenance, asof, holding=N
     elif risks: held='若持有：檢查風險／部位'
     factor=float(adjusted.Close.iloc[-1]/close) if adjusted is not None else 1.0
     stop=close-r['atr_stop_multiple']*float(last.atr)/factor if pd.notna(last.atr) else np.nan
+    utilization_high=cfg.get('sentiment',{}).get('margin_utilization_high',0.60)
+    pressure_growth=cfg.get('sentiment',{}).get('margin_pressure_growth',0.05)
+    if not bool(last.margin_ready): financing_pressure='資料不足'
+    elif bool(last.margin_overheat) or (pd.notna(last.margin_utilization) and last.margin_utilization>=utilization_high): financing_pressure='高'
+    elif pd.notna(last.margin_growth) and last.margin_growth>=pressure_growth: financing_pressure='中'
+    else: financing_pressure='低'
+    if pd.isna(last.chip_kline_score): stock_score=np.nan;stock_sentiment='資料不足'
+    else:
+        trend_points=15 if trend=='多頭' else (-15 if trend=='轉弱' else 0)
+        momentum_points=10 if pd.notna(last.rsi) and 50<=last.rsi<=70 else (-10 if pd.notna(last.rsi) and last.rsi<40 else 0)
+        stock_score=float(np.clip(0.6*last.chip_kline_score+20+trend_points+momentum_points,0,100))
+        stock_sentiment='偏多' if stock_score>=65 else ('偏空' if stock_score<=35 else '中性')
     row={'代號':ticker,'訊號日期':str(day.date()),'現價':close,'趨勢':trend,
          '短期趨勢':short_trend,'中期趨勢':trend,'長期趨勢':long_trend,'籌碼':chip,
          '籌碼K線':chip_kline,'籌碼K線分數':last.chip_kline_score,
          '籌碼K線資料涵蓋':'+'.join(coverage) or '無','籌碼K線用途':'研究參考；尚未參與交易建議',
+         '個股情緒':stock_sentiment,'個股情緒分數':stock_score,
+         '個股情緒形成依據':'籌碼K線60%＋中期趨勢與RSI規則；研究參考，不參與交易建議',
+         '融資壓力':financing_pressure,'融資維持率':'未提供；公開個股資料不能還原帳戶擔保品與負債',
          '風險':'／'.join(risks) or '未觸發風險門檻','未持有建議':entry,'持有情境建議':held,
          'ATR風險參考價':stop if stop>0 else np.nan,
          '支撐參考':last.support/factor,'壓力參考':last.resistance/factor,
@@ -264,7 +282,8 @@ def latest_assessment(ticker, raw, adjusted, x, cfg, provenance, asof, holding=N
          '自營商近N日淨買股數':last.dealer_net_sum,
          '融資餘額':last.margin_balance,'融券餘額':last.short_balance,
          '融資餘額近N日變化率':last.margin_growth,'融券餘額近N日變化率':last.short_growth,
-         '券資比':last.short_margin_ratio,'融資過熱':bool(last.margin_overheat) if bool(last.margin_ready) else np.nan,
+         '券資比':last.short_margin_ratio,'融資限額使用率':last.margin_utilization,
+         '融資過熱':bool(last.margin_overheat) if bool(last.margin_ready) else np.nan,
          '借券成交近N日股數':last.lending_volume_sum,'借券成交近N日占量':last.lending_volume_ratio,
          '借券成交偏高':bool(last.lending_high) if bool(last.lending_ready) else np.nan,
          '分點買超集中度':last.branch_buy_concentration,
@@ -279,6 +298,78 @@ def latest_assessment(ticker, raw, adjusted, x, cfg, provenance, asof, holding=N
         row.update({'持股資料':'已提供','股數':qty,'平均成本':cost,
                     '未實現損益':qty*(close-cost),'成本報酬率':close/cost-1})
     return row
+
+
+POSITIVE_WORDS=('beat','beats','upgrade','upgraded','growth','surge','record','profit','profits','raise','raises',
+                'strong','outperform','buyback','dividend','approval','win','wins','上修','成長','獲利','創高','買進','優於','增持')
+NEGATIVE_WORDS=('miss','misses','downgrade','downgraded','decline','drop','loss','losses','cut','cuts','warning',
+                'lawsuit','probe','recall','fraud','weak','underperform','裁員','下修','衰退','虧損','警告','調查','召回','減持')
+
+
+def news_sentiment(news,ticker,asof,cfg):
+    """Transparent headline lexicon. It archives a baseline for later validation, not causal impact."""
+    base={'新聞情緒':'資料不足','新聞情緒分數':np.nan,'新聞篇數':0,'新聞正面篇數':0,
+          '新聞負面篇數':0,'新聞中性篇數':0,'新聞資料狀態':'無可用新聞',
+          '新聞情緒用途':'研究參考；不參與交易建議或AI特徵'}
+    if news is None or news.empty:return base,pd.DataFrame()
+    f=news.copy();scores=[];labels=[]
+    for rec in f.to_dict('records'):
+        text=(str(rec.get('標題') or '')+' '+str(rec.get('摘要') or '')).lower()
+        pos=sum(text.count(w.lower()) for w in POSITIVE_WORDS);neg=sum(text.count(w.lower()) for w in NEGATIVE_WORDS)
+        score=(pos-neg)/max(1,pos+neg);scores.append(float(score))
+        labels.append('正面' if score>0 else ('負面' if score<0 else '中性'))
+    f['新聞情緒分數']=scores;f['新聞情緒標籤']=labels
+    def related(value):
+        if isinstance(value,(list,tuple,set)):values=[str(v).upper() for v in value]
+        elif value is None or (isinstance(value,float) and pd.isna(value)):values=[]
+        else:values=[s.strip().upper() for s in str(value).replace('[','').replace(']','').replace("'",'').split(',') if s.strip()]
+        return not values or ticker.upper() in values or ticker.split('.')[0].upper() in values
+    f['與個股直接相關']=f.get('相關代號',pd.Series([None]*len(f),index=f.index)).map(related)
+    used=f.loc[f['與個股直接相關']].copy()
+    if used.empty:used=f
+    score=float(used['新聞情緒分數'].mean());minimum=int(cfg['sentiment']['news_min_articles'])
+    used_labels=used['新聞情緒標籤'].tolist()
+    label='資料不足' if len(used)<minimum else ('偏多' if score>=cfg['sentiment']['news_positive_threshold'] else
+          ('偏空' if score<=cfg['sentiment']['news_negative_threshold'] else '中性'))
+    base.update({'新聞情緒':label,'新聞情緒分數':score,'新聞篇數':len(used),'新聞取得總篇數':len(f),
+                 '新聞正面篇數':used_labels.count('正面'),'新聞負面篇數':used_labels.count('負面'),
+                 '新聞中性篇數':used_labels.count('中性'),
+                 '新聞資料狀態':'可用；僅標題／摘要字典基準，尚未證明對報酬有預測力'})
+    return base,f
+
+
+def market_sentiment(context,cfg):
+    result={'市場情緒':'資料不足','市場情緒分數':np.nan,'大盤融資壓力':'資料不足',
+            '大盤融資近5日變化率':np.nan,'大盤融資近20日變化率':np.nan,
+            '大盤20日報酬率':np.nan,'大盤相對60日線':np.nan,
+            '市場情緒用途':'研究參考；不參與交易建議或AI特徵'}
+    if not context:return result
+    index=context.get('index');margin=context.get('margin')
+    if index is None or index.empty:return {**result,**context.get('meta',{})}
+    close=index.Close.dropna();ret20=close.pct_change(20,fill_method=None).iloc[-1] if len(close)>20 else np.nan
+    ma60=close.rolling(60).mean().iloc[-1] if len(close)>=60 else np.nan
+    distance=close.iloc[-1]/ma60-1 if pd.notna(ma60) else np.nan
+    g5=g20=np.nan
+    if margin is not None and not margin.empty and {'date','name','TodayBalance'}.issubset(margin):
+        m=margin.loc[margin.name.eq('MarginPurchaseMoney')].copy()
+        m['date']=pd.to_datetime(m.date);m=m.sort_values('date').drop_duplicates('date').set_index('date')
+        values=pd.to_numeric(m.TodayBalance,errors='coerce').dropna()
+        if len(values)>5:g5=values.iloc[-1]/values.iloc[-6]-1
+        if len(values)>20:g20=values.iloc[-1]/values.iloc[-21]-1
+    score=50
+    if pd.notna(ret20):score+=15 if ret20>0 else -15
+    if pd.notna(distance):score+=15 if distance>0 else -15
+    pressure='資料不足'
+    threshold=cfg['sentiment']['margin_pressure_growth']
+    if pd.notna(g20):
+        if g20>=threshold and pd.notna(ret20) and ret20<=0:pressure='高';score-=15
+        elif g20>=threshold:pressure='中';score-=5
+        else:pressure='低'
+    score=float(np.clip(score,0,100));label='偏多' if score>=65 else ('偏空' if score<=35 else '中性')
+    result.update({'市場情緒':label,'市場情緒分數':score,'大盤融資壓力':pressure,
+                   '大盤融資近5日變化率':g5,'大盤融資近20日變化率':g20,
+                   '大盤20日報酬率':ret20,'大盤相對60日線':distance})
+    result.update(context.get('meta',{}));return result
 
 
 def simulate(raw, adjusted, entry, exit_signal, cfg, strategy, start_index):
