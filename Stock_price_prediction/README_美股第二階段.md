@@ -61,10 +61,10 @@ Logistic、XGBoost 與小型 LSTM 使用相同樣本，研究未來10個交易�
 
 每次產出兩份 Excel，資料夾完全分開：
 
-- `Stock_price_prediction/reports/stage2_US/簡化版/YYYY/MM`：保留短、中、長期趨勢、時機結論、風險參考價與三分類 AI 研究機率。
-- `Stock_price_prediction/reports/stage2_US/詳細版/YYYY/MM`：原始 WHID 欄位加上來源、依據、回測、交易紀錄與 AI 評估。
-- `Stock_price_prediction/reports/stage2_US/研究資料/YYYY/MM`：設定快照、逐日訊號與可用的樣本外機率。
-- `Stock_price_prediction/reports/cache_stage2_US`：公開行情快取，預設 12 小時。
+- `reports/簡化版/US/US_日期_時間_Step2_Report.xlsx`：保留短、中、長期趨勢、時機結論、風險參考價與三分類 AI 研究機率。
+- `reports/詳細版/US/US_日期_時間_Step2_Report.xlsx`：原始 WHID 欄位加上來源、依據、回測、交易紀錄與 AI 評估。
+- `system_data/research/US/`：設定快照、逐日訊號與可用的樣本外機率。
+- `system_data/cache/US`：公開行情快取，預設 12 小時。
 
 供應商補齊資料後若希望立即重抓，可將 YAML 的 `cache_hours` 暫設為 `0`，重新執行後再恢復 `12`。
 

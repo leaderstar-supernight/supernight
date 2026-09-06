@@ -11,7 +11,8 @@ import numpy as np
 import pandas as pd
 
 BASE = Path(__file__).resolve().parent
-VALIDATION_ROOT = BASE / 'reports' / 'validation'
+PROJECT = BASE.parent
+VALIDATION_ROOT = PROJECT / 'system_data' / 'validation'
 DB_PATH = VALIDATION_ROOT / 'prediction_audit.sqlite3'
 CLASS_ORDER = ['down_first', 'neutral', 'up_first']
 
@@ -107,8 +108,9 @@ def connect(db_path=DB_PATH):
 
 
 def latest_detailed_report(market, not_before=None):
-    folder = BASE / 'reports' / f'stage2_{market}' / '詳細版'
-    files = [p for p in folder.rglob('*.xlsx') if not p.name.startswith('~$')] if folder.exists() else []
+    folder = PROJECT / 'reports' / '詳細版' / market
+    files = [p for p in folder.glob(f'{market}_*_Step2_Report.xlsx')
+             if not p.name.startswith('~$')] if folder.exists() else []
     if not_before is not None:
         threshold = pd.Timestamp(not_before).timestamp()
         files = [p for p in files if p.stat().st_mtime >= threshold]

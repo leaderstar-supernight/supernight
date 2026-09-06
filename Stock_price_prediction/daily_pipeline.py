@@ -11,7 +11,7 @@ from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
 PROJECT = BASE.parent
-LOG_ROOT = BASE / 'reports' / 'validation' / '每日執行紀錄'
+LOG_ROOT = PROJECT / 'system_data' / 'validation' / '每日執行紀錄'
 
 NOTEBOOKS = {
     'TW': [PROJECT / 'Stock_Valuation_ReDesgin_TW.ipynb', BASE / 'TW_Timing_第二階段.ipynb'],

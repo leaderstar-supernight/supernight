@@ -13,6 +13,7 @@ env/
 
 # Generated reports, caches, executed notebooks, and validation ledger
 /reports/
+/system_data/
 /Stock_price_prediction/reports/
 /Stock_price_prediction/docx_render_check/
 *.sqlite3-wal

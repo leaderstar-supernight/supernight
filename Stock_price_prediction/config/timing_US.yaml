@@ -74,4 +74,5 @@ backtest:
   take_profit: 0.15
   evaluation_sessions: 252
 output:
-  root: ../reports/stage2_US
+  root: ../../reports
+  system_root: ../../system_data

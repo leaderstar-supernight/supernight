@@ -61,8 +61,8 @@ Stock_price_prediction/daily_pipeline.py
 | 第二階段 Python 模組 | `Stock_price_prediction/*.py` | Notebook 實際呼叫的分析、AI 與報表邏輯 |
 | 第一階段真實設定 | `config/TW.yaml`、`config/US.yaml`、`config/Fin.yaml` | 股票名單、權重、FinMind token 等 |
 | 第二階段設定 | `Stock_price_prediction/config/timing_TW.yaml`、`timing_US.yaml` | 候選名單、門檻、輸出與回測設定 |
-| 歷史報表 | 兩層 `reports` 資料夾 | 日後查閱與候選名單來源 |
-| 驗證資料庫 | `Stock_price_prediction/reports/validation/prediction_audit.sqlite3` | 累積預測、10 日結算及 30 日評估歷史 |
+| 歷史報表 | 專案根目錄 `reports` | 日後查閱與候選名單來源 |
+| 驗證資料庫 | `system_data/validation/prediction_audit.sqlite3` | 累積預測、10 日結算及 30 日評估歷史 |
 | 說明文件 | `Stock_price_prediction/*.md`、`.docx` | 指標定義與操作說明 |
 
 `config/TW.yaml` 和 `config/Fin.yaml` 含 FinMind token。只可經可信任的私人裝置、加密磁碟或受控傳輸方式搬移，不要上傳公開 GitHub，也不要把 token 貼進 Codex 對話。
@@ -71,9 +71,9 @@ Stock_price_prediction/daily_pipeline.py
 
 - `__pycache__`
 - `.ipynb_checkpoints`
-- `Stock_price_prediction/reports/cache_stage2`
-- `Stock_price_prediction/reports/cache_stage2_US`
-- `Stock_price_prediction/docx_render_check`
+- `system_data/cache/TW`
+- `system_data/cache/US`
+- `system_data/docx_render_check`
 
 請勿只靠 GitHub clone 完成正式移機。版本庫通常不包含真實 YAML、每日日報、快取及驗證 SQLite，因此會遺失 FinMind 設定與已累積的預測歷史。
 
@@ -154,8 +154,8 @@ Stock_price_prediction/config/timing_US.yaml
 目前設定使用相對位置：
 
 - 台股 FinMind 設定指向專案根目錄的 `config/TW.yaml`。
-- 台股輸出指向 `Stock_price_prediction/reports/stage2_TW`。
-- 美股輸出指向 `Stock_price_prediction/reports/stage2_US`。
+- TW／US 兩階段 Excel 都指向專案根目錄 `reports/詳細版` 與 `reports/簡化版`。
+- 第二階段研究、快取及驗證資料指向專案根目錄 `system_data`。
 
 只要資料夾層級沒有被拆開，移機後不應把這些值改成某位 Windows 使用者的絕對路徑。
 
@@ -165,7 +165,15 @@ Notebook 可能保留舊執行輸出。畫面中看到舊電腦的 `C:\Users\...
 
 在新電腦開啟 PowerShell，進入複製後的 `Stock_Valuation` 根目錄，並啟用 WHID 環境。
 
-### 第一步：路徑與結構測試
+### 第一步：舊版資料夾搬移（舊專案升級時執行一次）
+
+```powershell
+python .\migrate_report_layout.py
+```
+
+這個工具可重複執行，會重新命名舊報表、搬移研究與驗證資料，並更新 SQLite 內保存的舊報表路徑。全新 clone 且沒有舊報表時可略過。
+
+### 第二步：路徑與結構測試
 
 ```powershell
 python .\Stock_price_prediction\daily_pipeline.py --dry-run
@@ -177,7 +185,7 @@ python .\Stock_price_prediction\daily_pipeline.py --dry-run
 - 能找到 TW、US 各兩份 Notebook。
 - 能讀取既有驗證資料庫狀態。
 
-### 第二步：確認驗證歷史仍在
+### 第三步：確認驗證歷史仍在
 
 ```powershell
 python .\Stock_price_prediction\prediction_audit.py status
@@ -185,7 +193,7 @@ python .\Stock_price_prediction\prediction_audit.py status
 
 若數字全部從零開始，先不要執行正式流程；應確認 `prediction_audit.sqlite3` 是否漏複製或放錯資料夾。
 
-### 第三步：執行一次完整流程
+### 第四步：執行一次完整流程
 
 ```powershell
 python .\Stock_price_prediction\daily_pipeline.py
@@ -194,7 +202,7 @@ python .\Stock_price_prediction\daily_pipeline.py
 完整流程會連接 FinMind 與 Yahoo，執行時間依股票數、網路及 AI 訓練狀態而異。完成後找到最新的：
 
 ```text
-Stock_price_prediction/reports/validation/每日執行紀錄/YYYY/MM/DD/執行編號/summary.json
+system_data/validation/每日執行紀錄/YYYY/MM/DD/執行編號/summary.json
 ```
 
 四個 Notebook 都應為 `status: ok`，最外層 `status` 也應為 `ok`。單一股票在結算時出現「原始價或還原價不可用」可列為資料警告；只要四階段與最外層狀態為 `ok`，就不代表整條流程失敗。
@@ -212,17 +220,16 @@ Windows 執行 Notebook 時可能顯示：
 
 | 用途 | 位置 |
 | --- | --- |
-| 台股第一階段詳細版 | `reports/詳細版/TW` |
-| 台股第一階段簡化版 | `reports/簡化版/TW` |
-| 美股第一階段詳細版 | `reports/詳細版/US` |
-| 美股第一階段簡化版 | `reports/簡化版/US` |
-| 台股第二階段 | `Stock_price_prediction/reports/stage2_TW` |
-| 美股第二階段 | `Stock_price_prediction/reports/stage2_US` |
-| 每次自動執行紀錄 | `Stock_price_prediction/reports/validation/每日執行紀錄` |
-| 預測驗證資料庫 | `Stock_price_prediction/reports/validation/prediction_audit.sqlite3` |
-| 30 日評估 | `Stock_price_prediction/reports/validation/30日評估/YYYY/MM` |
+| 台股詳細版（Step1、Step2） | `reports/詳細版/TW` |
+| 台股簡化版（Step1、Step2） | `reports/簡化版/TW` |
+| 美股詳細版（Step1、Step2） | `reports/詳細版/US` |
+| 美股簡化版（Step1、Step2） | `reports/簡化版/US` |
+| 第二階段研究資料 | `system_data/research/TW`、`system_data/research/US` |
+| 每次自動執行紀錄 | `system_data/validation/每日執行紀錄` |
+| 預測驗證資料庫 | `system_data/validation/prediction_audit.sqlite3` |
+| 30 日評估 | `system_data/validation/30日評估/YYYY/MM` |
 
-`Stock_price_prediction/reports/short_term_ai` 是舊版歷史報表，不是目前新版第二階段的正式輸出。
+舊版短線 AI 報表保存在 `system_data/legacy_reports/short_term_ai`，不是目前新版第二階段的正式輸出。
 
 ## 9. Windows 每晚 20:00 排程
 
@@ -287,7 +294,7 @@ AI 預測要經過未來 10 個交易日後才會成熟；基本面與估值則�
 
 這是從舊 Windows 完整複製來的 WHID 股票研究專案。請先做唯讀盤點，不要修改評分邏輯、YAML 權重、候選名單或刪除歷史資料。依交接文件檢查資料夾結構、真實 config 是否存在、FinMind token 是否已設定但不要顯示 token、prediction_audit.sqlite3 是否保留、四份正式 Notebook 的 Jupyter kernel、Python 套件與相對路徑。
 
-接著在新電腦建立獨立 Python 3.12 環境，安裝兩份 requirements，註冊 pytorch-gpu 核心，執行 daily_pipeline.py --dry-run 與 prediction_audit.py status。以上通過後，執行一次完整 daily_pipeline.py，檢查最新 summary.json、TW/US 第一與第二階段 Excel，以及驗證資料庫筆數。確認全部成功後，再建立每天台北時間 20:00 的 Windows 工作排程；排程使用新環境的 python.exe、指向 daily_pipeline.py，開啟錯過後執行、喚醒、失敗重試，並禁止重疊執行。
+接著在新電腦建立獨立 Python 3.12 環境，安裝兩份 requirements，註冊 pytorch-gpu 核心。若是舊版資料夾升級，先執行 migrate_report_layout.py；再執行 daily_pipeline.py --dry-run 與 prediction_audit.py status。以上通過後，執行一次完整 daily_pipeline.py，檢查最新 summary.json、TW/US 第一與第二階段 Excel，以及驗證資料庫筆數。確認全部成功後，再建立每天台北時間 20:00 的 Windows 工作排程；排程使用新環境的 python.exe、指向 daily_pipeline.py，開啟錯過後執行、喚醒、失敗重試，並禁止重疊執行。
 
 最後請回報：使用的 Python 路徑與版本、套件或 kernel 缺漏、dry-run 結果、完整流程四階段狀態、最新 summary.json 路徑、報表路徑、驗證資料庫統計、排程名稱與下次執行時間，以及舊電腦排程是否已停用。若發現舊電腦絕對路徑，只修改真正的程式或設定來源，不要把 Notebook 的舊執行輸出誤判為程式綁死路徑。
 ```

@@ -38,7 +38,8 @@ def load_config(path):
         if not isinstance(c.get(group), dict):
             raise ValueError(f'設定缺少 {group}')
     for group, key in [('data','finmind_config'), ('candidates','report_path'),
-                       ('candidates','holdings_path'), ('output','root')]:
+                       ('candidates','holdings_path'), ('output','root'),
+                       ('output','system_root')]:
         if c[group].get(key):
             c[group][key] = str((path.parent / c[group][key]).resolve())
     c['_config_path'] = str(path)
@@ -106,8 +107,12 @@ def report_date(path):
 
 
 def find_report(project):
-    paths = [p for p in (Path(project) / 'reports').rglob('*.xlsx')
-             if 'TW' in p.relative_to(project).parts and not p.name.startswith('~$')]
+    report_root = Path(project) / 'reports'
+    folder = report_root / '簡化版' / 'TW'
+    paths = [p for p in folder.glob('TW_*_Step1_Report.xlsx') if not p.name.startswith('~$')]
+    if not paths:
+        folder = report_root / '詳細版' / 'TW'
+        paths = [p for p in folder.glob('TW_*_Step1_Report.xlsx') if not p.name.startswith('~$')]
     if not paths: raise ValueError('找不到 WHID 台股報表；請填 report_path 或 tickers')
     return max(paths, key=lambda p: (report_date(p) or '', p.stat().st_mtime))
 
@@ -187,7 +192,7 @@ class Provider:
         self.asof = pd.Timestamp(self.now.date())
         if self.now.hour < 20: self.asof -= pd.Timedelta(days=1)
         self.start = (self.asof - pd.DateOffset(years=config['data']['years'])).strftime('%Y-%m-%d')
-        self.cache = Path(config['output']['root']).parent / 'cache_stage2'
+        self.cache = Path(config['output']['system_root']) / 'cache' / 'TW'
         self.cache.mkdir(parents=True, exist_ok=True)
         f = Path(config['data']['finmind_config'])
         settings = yaml.safe_load(f.read_text(encoding='utf-8-sig'))

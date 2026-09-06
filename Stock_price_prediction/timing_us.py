@@ -34,12 +34,17 @@ def _sheet(frame):
     return f
 
 def export_reports(result, cfg):
-    stamp=datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-    run_id=f'US_Timing_{stamp}'
-    root=Path(cfg['output']['root'])
-    paths={kind:root/kind/datetime.now().strftime('%Y/%m') for kind in ['詳細版','簡化版','研究資料']}
+    now=datetime.now()
+    stamp=now.strftime('%Y%m%d_%H%M%S')
+    run_id=f'US_{stamp}_Step2'
+    report_root=Path(cfg['output']['root'])
+    system_root=Path(cfg['output']['system_root'])
+    paths={'詳細版':report_root/'詳細版'/'US',
+           '簡化版':report_root/'簡化版'/'US',
+           '研究資料':system_root/'research'/'US'}
     for p in paths.values(): p.mkdir(parents=True,exist_ok=True)
-    simple=paths['簡化版']/(run_id+'_簡化.xlsx'); detailed=paths['詳細版']/(run_id+'_詳細.xlsx')
+    filename=f'{run_id}_Report.xlsx'
+    simple=paths['簡化版']/filename; detailed=paths['詳細版']/filename
     rules=[{'分類':g,'設定':k,'值':v} for g in ['rules','sentiment','ai','backtest'] for k,v in cfg[g].items()]
     rules.extend([
         {'分類':'說明','設定':'趨勢分層','值':'短期5/20/3、中期20/60/5、長期120/240/20；只有中期趨勢參與現行進出場與回測'},

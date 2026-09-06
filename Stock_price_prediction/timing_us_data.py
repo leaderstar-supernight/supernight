@@ -35,7 +35,7 @@ def load_config(path):
     path=Path(path).resolve();c=yaml.safe_load(path.read_text(encoding='utf-8-sig'))
     for g in ['data','candidates','rules','ai','backtest','output']:
         if not isinstance(c.get(g),dict): raise ValueError(f'設定缺少{g}')
-    for g,k in [('candidates','report_path'),('candidates','holdings_path'),('output','root')]:
+    for g,k in [('candidates','report_path'),('candidates','holdings_path'),('output','root'),('output','system_root')]:
         if c[g].get(k):c[g][k]=str((path.parent/c[g][k]).resolve())
     c['_config_path']=str(path)
     c.setdefault('sentiment',{})
@@ -96,7 +96,12 @@ def report_date(path):
 
 
 def find_report(project):
-    paths=[p for p in (Path(project)/'reports').rglob('*.xlsx') if 'US' in p.relative_to(project).parts and not p.name.startswith('~$')]
+    report_root=Path(project)/'reports'
+    folder=report_root/'簡化版'/'US'
+    paths=[p for p in folder.glob('US_*_Step1_Report.xlsx') if not p.name.startswith('~$')]
+    if not paths:
+        folder=report_root/'詳細版'/'US'
+        paths=[p for p in folder.glob('US_*_Step1_Report.xlsx') if not p.name.startswith('~$')]
     if not paths:raise ValueError('找不到WHID美股報表；請指定report_path或tickers')
     return max(paths,key=lambda p:(report_date(p) or '',p.stat().st_mtime))
 
@@ -179,7 +184,7 @@ class Provider:
         self.asof=pd.Timestamp(self.now.date())
         if self.now.hour<config['data']['cutoff_hour_new_york']:self.asof-=pd.Timedelta(days=1)
         self.start=(self.asof-pd.DateOffset(years=config['data']['years'])).strftime('%Y-%m-%d')
-        self.cache=Path(config['output']['root']).parent/'cache_stage2_US'
+        self.cache=Path(config['output']['system_root'])/'cache'/'US'
         self.cache.mkdir(parents=True,exist_ok=True)
         self._memo={}
 

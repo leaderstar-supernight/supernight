@@ -21,9 +21,9 @@ AI 狀態與未持有建議彼此獨立。簡化版會顯示上行先觸、下�
 
 一次輸出兩個 Excel，使用同一批資料及唯一時間戳：
 
-- `reports/stage2_TW/簡化版/YYYY/MM/`：精簡結論，包含短、中、長期趨勢、籌碼K線、市場／個股／新聞情緒及融資壓力。
-- `reports/stage2_TW/詳細版/YYYY/MM/`：原始WHID欄位（前綴WHID_）、規則依據、資料來源、AI測試、機率分箱、單檔交易研究。
-- `reports/stage2_TW/研究資料/YYYY/MM/`：每日候選／結論快照、逐日訊號及AI樣本外預測。
+- `../reports/簡化版/TW/TW_日期_時間_Step2_Report.xlsx`：精簡結論，包含短、中、長期趨勢、籌碼K線、市場／個股／新聞情緒及融資壓力。
+- `../reports/詳細版/TW/TW_日期_時間_Step2_Report.xlsx`：原始WHID欄位（前綴WHID_）、規則依據、資料來源、AI測試、機率分箱、單檔交易研究。
+- `../system_data/research/TW/`：每日候選／結論快照、逐日訊號及AI樣本外預測。
 
 這是新的第二階段報表，不替換第一階段的47欄報表。
 
