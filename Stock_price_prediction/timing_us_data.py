@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
-VERSION='US-timing-1.6'
+VERSION='US-timing-1.7'
 NY=ZoneInfo('America/New_York')
 TAIPEI=ZoneInfo('Asia/Taipei')
 
@@ -33,9 +33,9 @@ def symbol(value):
 
 def load_config(path):
     path=Path(path).resolve();c=yaml.safe_load(path.read_text(encoding='utf-8-sig'))
-    for g in ['data','candidates','rules','ai','backtest','output']:
+    for g in ['data','candidates','rules','ai','timesfm','backtest','output']:
         if not isinstance(c.get(g),dict): raise ValueError(f'設定缺少{g}')
-    for g,k in [('candidates','report_path'),('candidates','holdings_path'),('output','root'),('output','system_root')]:
+    for g,k in [('candidates','report_path'),('candidates','holdings_path'),('timesfm','model_cache'),('output','root'),('output','system_root')]:
         if c[g].get(k):c[g][k]=str((path.parent/c[g][k]).resolve())
     c['_config_path']=str(path)
     c.setdefault('sentiment',{})
@@ -47,7 +47,7 @@ def load_config(path):
     if not isinstance(s['enabled'],bool) or not isinstance(s['news_enabled'],bool):raise ValueError('情緒研究開關須為布林值')
     if int(s['news_count'])<1 or int(s['news_min_articles'])<1:raise ValueError('新聞篇數設定錯誤')
     if not -1<s['news_negative_threshold']<s['news_positive_threshold']<1:raise ValueError('新聞情緒門檻設定錯誤')
-    r,a,b=c['rules'],c['ai'],c['backtest']
+    r,a,tf,b=c['rules'],c['ai'],c['timesfm'],c['backtest']
     for k in ['short_fast_ma','short_slow_ma','short_slope_days','fast_ma','slow_ma','slope_days',
               'long_fast_ma','long_slow_ma','long_slope_days','flow_days']:
         if not isinstance(r[k],int) or r[k]<1: raise ValueError(f'{k}須為正整數')
@@ -67,6 +67,15 @@ def load_config(path):
     if not a['models'] or not set(a['models']).issubset(supported): raise ValueError('AI模型設定錯誤')
     if not a.get('ensemble_models') or not set(a['ensemble_models']).issubset(set(a['models'])):
         raise ValueError('AI集成模型必須是models的非空子集合')
+    if not isinstance(tf.get('enabled'),bool) or not isinstance(tf.get('research_only'),bool):raise ValueError('TimesFM開關須為布林值')
+    if tf.get('enabled') and not tf.get('research_only'):raise ValueError('TimesFM 3.0只允許本專案以research_only模式使用')
+    if tf.get('backend')!='timesfm_3_pytorch' or not str(tf.get('model_id','')).strip():raise ValueError('TimesFM模型設定錯誤')
+    if str(tf.get('device','auto')).lower() not in {'auto','cpu','cuda'}:raise ValueError('TimesFM device必須是auto、cpu或cuda')
+    for k in ['context_length','min_context','horizon','atr_period','per_core_batch_size']:
+        if not isinstance(tf.get(k),int) or tf[k]<1:raise ValueError(f'TimesFM {k}須為正整數')
+    if tf['min_context']>tf['context_length']:raise ValueError('TimesFM min_context不可大於context_length')
+    if tf['horizon']!=a['horizon']:raise ValueError('TimesFM與AI horizon必須一致')
+    if not isinstance(tf.get('symmetric_averaging'),bool):raise ValueError('TimesFM symmetric_averaging須為布林值')
     for k in ['fee_rate','sell_fee_rate','slippage','stop_loss','take_profit']:
         if number(b[k]) is None or not 0<=b[k]<1:raise ValueError(f'{k}設定錯誤')
     if b['fee_rate']+b['sell_fee_rate']>=1:raise ValueError('總費率設定錯誤')

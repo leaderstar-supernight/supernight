@@ -63,6 +63,20 @@ ai:
   lstm_patience: 5
   lstm_validation_size: 42
   lstm_walk_forward: false # 避免每個滾動區間重訓；仍執行最終測試與最新模型
+timesfm:
+  enabled: true
+  research_only: true
+  backend: timesfm_3_pytorch
+  model_id: google/timesfm-3.0-pytorch
+  model_cache: ../../system_data/models/timesfm3
+  device: auto
+  context_length: 512
+  min_context: 256
+  horizon: 10
+  atr_period: 14
+  per_core_batch_size: 4
+  symmetric_averaging: false
+  # 僅預測10日價格路徑；不參與AI集成、規則、評分或交易建議。
 backtest:
   enabled: true
   initial_cash: 100000          # USD；單檔研究，不是多檔投資組合資金

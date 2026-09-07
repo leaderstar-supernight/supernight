@@ -63,6 +63,7 @@ def _empty_result() -> dict:
         "ai_status": empty,
         "ai_predictions": empty,
         "signals": empty,
+        "timesfm_path": empty,
         "news": empty,
         "market_context": empty,
         "candidates": frame,
@@ -81,7 +82,7 @@ def verify_export_functions() -> dict:
         cfg = {
             "output": {"root": str(root / "reports"),
                        "system_root": str(root / "system_data")},
-            "rules": {}, "sentiment": {}, "ai": {}, "backtest": {},
+            "rules": {}, "sentiment": {}, "ai": {}, "timesfm": {}, "backtest": {},
         }
         paths = {
             "TW": export_tw(_empty_result(), cfg),
@@ -95,6 +96,9 @@ def verify_export_functions() -> dict:
                     raise AssertionError(f"{market} {version} 檔名或輸出失敗：{path}")
                 if path.parent != root / "reports" / version / market:
                     raise AssertionError(f"{market} {version} 路徑錯誤：{path.parent}")
+            with pd.ExcelFile(market_paths["詳細版"]) as book:
+                if "TimesFMPath" not in book.sheet_names:
+                    raise AssertionError(f"{market} 詳細版缺少TimesFMPath工作表")
             result[market] = market_paths
         return result
 

@@ -8,9 +8,11 @@ import pandas as pd
 from timing_us_data import VERSION, Provider, candidates, load_config, number, read_holdings
 from timing_us_rules import signals, latest_assessment, compare_strategies, market_sentiment, news_sentiment
 from timing_us_ai import run_ai, summarize_model_metrics
+from timing_timesfm import TimesFMPathRunner, summary_columns
 
 SIMPLE_COLUMNS=['代號','訊號日期NY','分析日收盤價USD','短期趨勢','中期趨勢','長期趨勢','相對大盤動能','量價參考','市場環境','市場情緒','個股情緒','新聞情緒','風險','未持有建議','持有情境建議',
- 'ATR風險參考價USD','支撐參考USD','壓力參考USD','AI同區間最佳模型','AI上行先觸機率','AI下行先觸機率','AI盤整機率','AI狀態','資料狀態']
+ 'ATR風險參考價USD','支撐參考USD','壓力參考USD','AI同區間最佳模型','AI上行先觸機率','AI下行先觸機率','AI盤整機率',
+ *summary_columns('US'),'AI狀態','資料狀態']
 
 
 def safe_json(value):
@@ -45,7 +47,7 @@ def export_reports(result, cfg):
     for p in paths.values(): p.mkdir(parents=True,exist_ok=True)
     filename=f'{run_id}_Report.xlsx'
     simple=paths['簡化版']/filename; detailed=paths['詳細版']/filename
-    rules=[{'分類':g,'設定':k,'值':v} for g in ['rules','sentiment','ai','backtest'] for k,v in cfg[g].items()]
+    rules=[{'分類':g,'設定':k,'值':v} for g in ['rules','sentiment','ai','timesfm','backtest'] for k,v in cfg[g].items()]
     rules.extend([
         {'分類':'說明','設定':'趨勢分層','值':'短期5/20/3、中期20/60/5、長期120/240/20；只有中期趨勢參與現行進出場與回測'},
         {'分類':'說明','設定':'AI目標','值':'未來10個交易日先觸及上方1.5倍ATR、下方1.0倍ATR，或期間內兩者皆未觸及；同日雙觸採下方'},
@@ -54,6 +56,9 @@ def export_reports(result, cfg):
         {'分類':'說明','設定':'市場／個股／新聞情緒','值':'透明規則的研究參考，保存每日輸入供後續驗證；目前不參與交易建議、回測或AI特徵'},
         {'分類':'限制','設定':'美股融資','值':'FINRA只有月度市場總額，沒有公開逐股融資維持率；不混入每日情緒分數'},
         {'分類':'限制','設定':'AI決策','值':'所有AI機率與Momentum Benchmark只作研究參考，未用於交易建議；LSTM與Momentum Benchmark不加入正式集成'},
+        {'分類':'說明','設定':'TimesFM 10日路徑','值':'TimesFM 3.0依還原收盤價預測未來10個交易日價格路徑，再以與AI相同的上方1.5 ATR／下方1.0 ATR門檻判讀先觸方向'},
+        {'分類':'限制','設定':'TimesFM用途','值':'個人非商業研究；不參與AI集成、分數、趨勢、量價、風險或任何交易建議'},
+        {'分類':'限制','設定':'TimesFM預估日期','值':'路徑以10個交易日序為準；日期欄只排除週末，未排除美股休市日'},
         {'分類':'限制','設定':'回測','值':'固定候選名單的單檔研究，不是WHID歷史選股或投資組合績效'},
         {'分類':'限制','設定':'成交','值':'前日訊號下一日開盤；同日雙觸價採停損優先；零量/一價日不成交'},
         {'分類':'限制','設定':'價格','值':'還原價、分數股與股息再投資研究假設；未模擬實際張數/最低手續費'},
@@ -67,6 +72,7 @@ def export_reports(result, cfg):
         'Trades':result['trades'],'Equity':result['equity'],'AILatest':result['ai_latest'],
         'AIMetrics':result['ai_metrics'],'AIComparison':result['ai_comparison'],
         'AIModelSummary':result['ai_model_summary'],'AICalibration':result['ai_calibration'],'AIStatus':result['ai_status'],
+        'TimesFMPath':result.get('timesfm_path',pd.DataFrame()),
         'News':result['news'],'MarketContext':result['market_context'],
         'Rules':pd.DataFrame(rules),'CandidateSource':pd.DataFrame([result['provenance']]),
         'Candidates':result['candidates']}
@@ -87,7 +93,7 @@ def export_reports(result, cfg):
                     ws.column_dimensions[get_column_letter(j)].width=min(42,max(14,len(str(col))*1.7))
                     for cell in list(cells)[1:]:
                         if isinstance(cell.value,(int,float)):
-                            cell.number_format='0.0%' if any(s in str(col).lower() for s in ['probability','return','drawdown','win_rate','比例','機率','報酬率','乖離']) else '#,##0.000'
+                            cell.number_format='0.0%' if any(s in str(col).lower() for s in ['probability','return','drawdown','win_rate','比例','機率','報酬率','乖離','漲跌幅']) else '#,##0.000'
     snapshot=paths['研究資料']/(run_id+'_snapshot.json')
     snapshot.write_text(json.dumps(safe_json({'version':VERSION,'created_utc':datetime.now(timezone.utc),
         'config':cfg,'provenance':result['provenance'],'rows':result['detail'].to_dict('records')}),ensure_ascii=False,indent=2),encoding='utf-8')
@@ -124,7 +130,7 @@ def select_analysis_window(raw, adjusted, benchmark, cfg, asof):
 
 
 def analyze_bundle(ticker, candidate, raw, adjusted, benchmark, meta, cfg, provenance, asof, holding=None,
-                   market_summary=None, news_summary=None):
+                   market_summary=None, news_summary=None, timesfm_runner=None):
     raw,adjusted,benchmark,window=select_analysis_window(raw,adjusted,benchmark,cfg,asof)
     x=signals(raw,adjusted,benchmark,cfg)
     row=latest_assessment(ticker,raw,adjusted,x,cfg,provenance,asof,holding)
@@ -144,6 +150,12 @@ def analyze_bundle(ticker, candidate, raw, adjusted, benchmark, meta, cfg, prove
             'comparison':pd.DataFrame(),'momentum_snapshot':{'available':False,'label':'資料不足'},
             'predictions':pd.DataFrame(),'errors':[],'status':'行情過期，AI未執行'}
     else: ai=run_ai(adjusted,x,cfg,benchmark)
+    timesfm_runner=timesfm_runner or TimesFMPathRunner(cfg,'US')
+    if stale: timesfm_summary,timesfm_path=timesfm_runner.unavailable('行情過期，TimesFM未執行')
+    else: timesfm_summary,timesfm_path=timesfm_runner.forecast(ticker,raw,adjusted)
+    if reference and timesfm_summary['TimesFM狀態'].startswith('可用'):
+        timesfm_summary['TimesFM狀態']='參考日模型，非最新預測；'+timesfm_summary['TimesFM狀態']
+    row.update(timesfm_summary)
     row['AI狀態']=('參考日模型，非最新預測；' if reference else '')+ai['status']
     momentum=ai.get('momentum_snapshot',{})
     row['動能基準']=momentum.get('benchmark',cfg['data'].get('benchmark','SPY'))
@@ -170,12 +182,13 @@ def analyze_bundle(ticker, candidate, raw, adjusted, benchmark, meta, cfg, prove
     source={'代號':ticker,**meta,**window,'原始列數':len(raw),'還原列數':len(adjusted) if adjusted is not None else 0,
         '基準列數':len(benchmark) if benchmark is not None else 0,
         '動能基準資料狀態':momentum.get('reason','資料不足'),
+        'TimesFM資料狀態':timesfm_summary['TimesFM狀態'],
         '最後行情日':str(raw.index[-1].date()),'量價指標可用':bool(x.flow_ready.iloc[-1]),
         '回測狀態':'已產出單檔研究比較' if not b.empty else '停用／資料不足'}
     signal=x[['technical_entry','entry','exit','flow_ready','market_ready','short_trend_up','short_trend_down',
               'medium_trend_up','medium_trend_down','long_trend_up','long_trend_down','trend_up','risk_ok']].copy()
     signal.index.name='date'; signal=signal.reset_index(); signal.insert(0,'代號',ticker)
-    return row,source,ai,b,t,e,signal
+    return row,source,ai,b,t,e,signal,timesfm_path
 
 def run(config_path='config/timing_US.yaml', provider=None, candidate_frame=None, provenance=None,
         write=True, progress=print):
@@ -187,15 +200,16 @@ def run(config_path='config/timing_US.yaml', provider=None, candidate_frame=None
     provenance.setdefault('第二階段執行日期台北',str(getattr(provider,'report_check_date',provider.asof).date()))
     provenance.setdefault('WHID日期比較規則','以台北日曆日比較WHID報表日期；不與最後交易日比較')
     holdings=read_holdings(cfg['candidates'].get('holdings_path'))
+    timesfm_runner=TimesFMPathRunner(cfg,'US')
     market_summary=market_sentiment(None,cfg)
     if cfg['sentiment']['enabled'] and hasattr(provider,'market_context'):
         try:market_summary=market_sentiment(provider.market_context(),cfg)
         except Exception as exc:market_summary['市場情緒資料狀態']='資料不足：'+type(exc).__name__
     buckets={k:[] for k in ['detail','data_status','ai_latest','ai_metrics','ai_comparison','ai_calibration','ai_predictions',
-                            'ai_status','backtest','trades','equity','signals','news']}
+                            'ai_status','backtest','trades','equity','signals','timesfm_path','news']}
     for i,candidate in enumerate(candidate_frame.to_dict('records'),1):
         ticker=candidate['代號']
-        if progress: progress(f'[{i}/{len(candidate_frame)}] {ticker}：資料、規則、AI研究與回測')
+        if progress: progress(f'[{i}/{len(candidate_frame)}] {ticker}：資料、規則、AI、TimesFM與回測研究')
         try:
             news_summary,scored_news=news_sentiment(None,ticker,provider.asof,cfg)
             if cfg['sentiment']['enabled'] and hasattr(provider,'news'):
@@ -203,20 +217,22 @@ def run(config_path='config/timing_US.yaml', provider=None, candidate_frame=None
                 except Exception as exc:news_summary['新聞資料狀態']='資料不足：'+type(exc).__name__
             if not scored_news.empty:buckets['news'].append(scored_news)
             raw,adjusted,benchmark,meta=provider.bundle(ticker)
-            row,source,ai,b,t,e,s=analyze_bundle(ticker,candidate,raw,adjusted,benchmark,meta,cfg,provenance,provider.asof,
-                holdings.get(ticker),market_summary,news_summary)
+            row,source,ai,b,t,e,s,tf_path=analyze_bundle(ticker,candidate,raw,adjusted,benchmark,meta,cfg,provenance,provider.asof,
+                holdings.get(ticker),market_summary,news_summary,timesfm_runner)
             buckets['detail'].append(pd.DataFrame([row])); buckets['data_status'].append(pd.DataFrame([source]))
             for key,df in [('ai_latest',ai['latest']),('ai_metrics',ai['metrics']),('ai_comparison',ai['comparison']),('ai_calibration',ai['calibration']),
                 ('ai_predictions',ai['predictions']),('backtest',b),('trades',t),('equity',e)]:
                 if not df.empty: buckets[key].append(df.assign(代號=ticker))
             buckets['ai_status'].append(pd.DataFrame([{'代號':ticker,'狀態':ai['status'],'說明':'；'.join(ai['errors'])}]))
             buckets['signals'].append(s)
+            if not tf_path.empty:buckets['timesfm_path'].append(tf_path)
         except Exception as exc:
             # Do not include raw provider/request exceptions in deliverables.
             reason=type(exc).__name__
             if isinstance(exc,(ValueError,RuntimeError)): reason+=': '+str(exc)[:180]
             buckets['detail'].append(pd.DataFrame([{'代號':ticker,'未持有建議':'資料不足／暫不判斷',
-                '持有情境建議':'資料不足，人工確認','AI狀態':'未執行','資料狀態':reason}]))
+                '持有情境建議':'資料不足，人工確認','AI狀態':'未執行','TimesFM10日路徑判讀':'資料不足',
+                'TimesFM狀態':'未執行：股票流程失敗','資料狀態':reason}]))
             buckets['data_status'].append(pd.DataFrame([{'代號':ticker,'錯誤':reason}]))
             if progress: progress(f'{ticker} 未完成：{type(exc).__name__}；已保留失敗列')
     result={k:pd.concat(v,ignore_index=True) if v else pd.DataFrame() for k,v in buckets.items()}

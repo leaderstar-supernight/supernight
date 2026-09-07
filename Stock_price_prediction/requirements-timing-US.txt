@@ -9,5 +9,6 @@ torch>=2.4
 nbformat>=5.10
 nbclient>=0.10
 scipy>=1.13
+timesfm[torch]==3.0.1
 tzdata>=2024.1
 # Optional: finlab (separately enabled research only)

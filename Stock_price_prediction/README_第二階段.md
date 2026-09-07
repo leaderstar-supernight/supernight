@@ -80,6 +80,14 @@ FinMind 提供原始日線、成交金額、法人、融資融券與借券資料
 
 `TW-timing-1.6` 將 TAIEX 加入 AI：所有正式模型除了原有價量特徵，也使用大盤20／60／120日報酬、個股相對大盤20／60／120日報酬及60日風險調整相對動能。另有 `momentum_benchmark`，只使用這七項動能特徵的 Logistic 基準模型，用來判斷複雜模型是否真的比單純動能更準。
 
+## TimesFM 3.0 十日價格路徑研究
+
+`TW-timing-1.7` 會以還原收盤價建立 TimesFM 3.0 的未來10個交易日價格路徑，再映射回目前原始價格。簡化版在三分類AI機率旁顯示路徑判讀、第10日預測價、預測漲跌幅、預估觸及日與狀態；詳細版另有 `TimesFMPath`，保留每日點預測、Q10、Q50、Q90及ATR門檻。
+
+路徑判讀使用與現有AI目標相同的上方1.5倍ATR及下方1.0倍ATR，但只比較 TimesFM 點預測路徑先碰哪個門檻。它不是三分類機率模型，也不加入 Logistic／XGBoost 集成，不影響趨勢、籌碼、風險、回測或交易建議。
+
+TimesFM 3.0 使用[官方非商業授權](https://huggingface.co/google/timesfm-3.0-pytorch/blob/main/LICENSE)。本功能只供個人非商業研究；不可用於正式生產、商業決策、客戶交付或付費產品。缺少套件或模型時，原有階段二仍會完成，報表只會將 `TimesFM狀態` 標示為未執行。首次使用需依 `requirements-timing.txt` 安裝套件並下載模型權重；權重存於 `system_data/models/timesfm3`，不提交 GitHub。
+
 正式基準集成仍只平均 Logistic 與 XGBoost；LSTM 與 Momentum Benchmark 都是比較模型，不會因單次結果加入集成。TAIEX缺漏時，Logistic、XGBoost及LSTM會沿用原本11項價量特徵，Momentum Benchmark標示資料不足，不讓整套AI失效。
 
 1. 每個訊號日固定該日 ATR(14)，往後觀察10個交易日；先觸及收盤價加1.5倍ATR為上行先觸，先觸及收盤價減1.0倍ATR為下行先觸，兩者均未觸及為盤整。同日雙觸保守採下行。

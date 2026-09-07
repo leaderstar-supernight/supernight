@@ -57,6 +57,14 @@ Logistic、XGBoost 與小型 LSTM 使用相同樣本，研究未來10個交易�
 
 `US-timing-1.6` 將 SPY 20／60／120日報酬、個股相對 SPY 20／60／120日報酬與60日風險調整相對動能加入所有正式AI特徵。另有 `momentum_benchmark`，只使用這七項動能特徵，作為透明的 Logistic 比較基準。SPY資料不足時，其他模型沿用原本價量特徵，只有 Momentum Benchmark停用。
 
+## TimesFM 3.0 十日價格路徑研究
+
+`US-timing-1.7` 會以 Yahoo 還原收盤價建立 TimesFM 3.0 的未來10個交易日價格路徑，再映射回目前原始美元價格。簡化版在三分類AI機率旁顯示路徑判讀、第10日預測價、預測漲跌幅、預估觸及日與狀態；詳細版另有 `TimesFMPath`，保留每日點預測、Q10、Q50、Q90及ATR門檻。若最新行情不完整而改用最近完整日，TimesFM狀態會明確標示為參考日模型。
+
+路徑判讀使用與現有AI目標相同的上方1.5倍ATR及下方1.0倍ATR，但只比較 TimesFM 點預測路徑先碰哪個門檻。它不是三分類機率模型，也不加入 Logistic／XGBoost 集成，不影響趨勢、量價、風險、回測或交易建議。
+
+TimesFM 3.0 使用[官方非商業授權](https://huggingface.co/google/timesfm-3.0-pytorch/blob/main/LICENSE)。本功能只供個人非商業研究；不可用於正式生產、商業決策、客戶交付或付費產品。缺少套件或模型時，原有階段二仍會完成，報表只會將 `TimesFM狀態` 標示為未執行。首次使用需依 `requirements-timing-US.txt` 安裝套件並下載模型權重；權重存於 `system_data/models/timesfm3`，不提交 GitHub。
+
 詳細版保留 AIMetrics、AIComparison、AIModelSummary、AICalibration及AIStatus。`AIComparison`讓 Logistic、XGBoost、LSTM、Momentum Benchmark與Ensemble在相同126交易日final test比較，以低 Log Loss、低 Brier及高 Macro F1排名；`AIModelSummary`再依樣本數彙總全部股票。沒有通過足夠樣本外驗證前，不應把機率當成有效交易依據。
 
 ## 報表與獨立性

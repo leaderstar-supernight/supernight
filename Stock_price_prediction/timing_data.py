@@ -12,7 +12,7 @@ import pandas as pd
 import requests
 import yaml
 
-VERSION = 'TW-timing-1.6'
+VERSION = 'TW-timing-1.7'
 TW_ZONE = timezone(timedelta(hours=8))
 
 
@@ -34,11 +34,11 @@ def symbol(value):
 def load_config(path):
     path = Path(path).resolve()
     c = yaml.safe_load(path.read_text(encoding='utf-8-sig'))
-    for group in ['data', 'candidates', 'rules', 'ai', 'backtest', 'output']:
+    for group in ['data', 'candidates', 'rules', 'ai', 'timesfm', 'backtest', 'output']:
         if not isinstance(c.get(group), dict):
             raise ValueError(f'設定缺少 {group}')
     for group, key in [('data','finmind_config'), ('candidates','report_path'),
-                       ('candidates','holdings_path'), ('output','root'),
+                       ('candidates','holdings_path'), ('timesfm','model_cache'), ('output','root'),
                        ('output','system_root')]:
         if c[group].get(key):
             c[group][key] = str((path.parent / c[group][key]).resolve())
@@ -58,7 +58,7 @@ def load_config(path):
         raise ValueError('新聞情緒門檻設定錯誤')
     if not 0<s['margin_pressure_growth']<1 or not 0<s['margin_utilization_high']<=1:
         raise ValueError('融資壓力門檻設定錯誤')
-    r, a, b = c['rules'], c['ai'], c['backtest']
+    r, a, tf, b = c['rules'], c['ai'], c['timesfm'], c['backtest']
     for key in ['short_fast_ma','short_slow_ma','short_slope_days','fast_ma','slow_ma','slope_days',
                 'long_fast_ma','long_slow_ma','long_slope_days','chip_days','chip_history_days','branch_top_n']:
         if int(r[key]) < 1: raise ValueError(f'{key} 必須大於零')
@@ -80,6 +80,23 @@ def load_config(path):
     if not a['models'] or not set(a['models']).issubset(supported): raise ValueError('AI模型設定錯誤')
     if not a.get('ensemble_models') or not set(a['ensemble_models']).issubset(set(a['models'])):
         raise ValueError('AI集成模型必須是models的非空子集合')
+    if not isinstance(tf.get('enabled'), bool) or not isinstance(tf.get('research_only'), bool):
+        raise ValueError('TimesFM開關須為布林值')
+    if tf.get('enabled') and not tf.get('research_only'):
+        raise ValueError('TimesFM 3.0只允許本專案以research_only模式使用')
+    if tf.get('backend') != 'timesfm_3_pytorch' or not str(tf.get('model_id', '')).strip():
+        raise ValueError('TimesFM模型設定錯誤')
+    if str(tf.get('device', 'auto')).lower() not in {'auto', 'cpu', 'cuda'}:
+        raise ValueError('TimesFM device必須是auto、cpu或cuda')
+    for key in ['context_length','min_context','horizon','atr_period','per_core_batch_size']:
+        if not isinstance(tf.get(key), int) or tf[key] < 1:
+            raise ValueError(f'TimesFM {key}須為正整數')
+    if tf['min_context'] > tf['context_length']:
+        raise ValueError('TimesFM min_context不可大於context_length')
+    if tf['horizon'] != a['horizon']:
+        raise ValueError('TimesFM與AI horizon必須一致')
+    if not isinstance(tf.get('symmetric_averaging'), bool):
+        raise ValueError('TimesFM symmetric_averaging須為布林值')
     for key in ['fee_rate','sell_tax_rate','slippage','stop_loss','take_profit']:
         if not 0 <= b[key] < 1: raise ValueError(f'{key} 設定超出範圍')
     if b['initial_cash'] <= 0 or b['max_holding_sessions'] < 1 or b['evaluation_sessions'] < 2:
