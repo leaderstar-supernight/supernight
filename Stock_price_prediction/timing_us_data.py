@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
-VERSION='US-timing-1.5'
+VERSION='US-timing-1.6'
 NY=ZoneInfo('America/New_York')
 TAIPEI=ZoneInfo('Asia/Taipei')
 
@@ -63,7 +63,7 @@ def load_config(path):
         if number(a[k]) is None or a[k]<=0:raise ValueError(f'AI {k}須為正數')
     if not 0<=a['lstm_dropout']<1:raise ValueError('AI lstm_dropout設定錯誤')
     if not isinstance(a['lstm_walk_forward'],bool):raise ValueError('AI lstm_walk_forward須為布林值')
-    supported={'logistic','xgboost','lstm'}
+    supported={'logistic','xgboost','lstm','momentum_benchmark'}
     if not a['models'] or not set(a['models']).issubset(supported): raise ValueError('AI模型設定錯誤')
     if not a.get('ensemble_models') or not set(a['ensemble_models']).issubset(set(a['models'])):
         raise ValueError('AI集成模型必須是models的非空子集合')

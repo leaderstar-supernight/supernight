@@ -1,6 +1,7 @@
 # 第二階段獨立設定；不更動 WHID 權重。所有門檻都是尚待驗證的研究假設。
 data:
   finmind_config: ../../config/TW.yaml
+  benchmark: TAIEX
   years: 5
   yahoo_adjusted_fallback: true
   cache_hours: 12
@@ -49,7 +50,7 @@ sentiment:
   # 市場／個股／新聞情緒與融資壓力目前只供研究，不參與建議、回測或AI特徵。
 ai:
   enabled: true
-  models: [logistic, xgboost, lstm]
+  models: [logistic, xgboost, lstm, momentum_benchmark]
   ensemble_models: [logistic, xgboost] # LSTM先作挑戰模型，通過樣本外驗證後才加入集成
   horizon: 10
   up_atr: 1.5

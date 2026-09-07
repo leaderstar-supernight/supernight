@@ -12,7 +12,7 @@ import pandas as pd
 import requests
 import yaml
 
-VERSION = 'TW-timing-1.5'
+VERSION = 'TW-timing-1.6'
 TW_ZONE = timezone(timedelta(hours=8))
 
 
@@ -76,7 +76,7 @@ def load_config(path):
         if number(a[key]) is None or a[key] <= 0: raise ValueError(f'AI {key} 必須大於零')
     if not 0 <= a['lstm_dropout'] < 1: raise ValueError('AI lstm_dropout 必須介於零與一')
     if not isinstance(a['lstm_walk_forward'],bool): raise ValueError('AI lstm_walk_forward 必須為布林值')
-    supported={'logistic','xgboost','lstm'}
+    supported={'logistic','xgboost','lstm','momentum_benchmark'}
     if not a['models'] or not set(a['models']).issubset(supported): raise ValueError('AI模型設定錯誤')
     if not a.get('ensemble_models') or not set(a['ensemble_models']).issubset(set(a['models'])):
         raise ValueError('AI集成模型必須是models的非空子集合')

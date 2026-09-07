@@ -4,13 +4,54 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-FEATURES = [
+BASE_FEATURES = [
     'return_1', 'return_5', 'return_20', 'return_60', 'distance_20',
     'distance_60', 'rsi', 'atr_pct', 'volume_ratio', 'volatility_20',
     'range_position',
 ]
+MOMENTUM_FEATURES = [
+    'benchmark_return_20', 'benchmark_return_60', 'benchmark_return_120',
+    'relative_return_20', 'relative_return_60', 'relative_return_120',
+    'relative_momentum_risk_adjusted_60',
+]
+FEATURES = BASE_FEATURES + MOMENTUM_FEATURES
 CLASSES = ['down_first', 'neutral', 'up_first']
 CLASS_ZH = {'down_first': '下行先觸', 'neutral': '盤整', 'up_first': '上行先觸'}
+
+
+def add_momentum_features(prices, feature_frame, benchmark, benchmark_name):
+    """Add market and relative momentum without fabricating a missing benchmark."""
+    frame = feature_frame.copy()
+    snapshot = {
+        'available': False, 'benchmark': benchmark_name, 'label': '資料不足',
+        'reason': '市場基準行情不足',
+    }
+    if benchmark is None or benchmark.empty or 'Close' not in benchmark:
+        return frame, list(BASE_FEATURES), snapshot
+    stock_close = pd.to_numeric(prices['Close'], errors='coerce').reindex(frame.index)
+    benchmark_close = pd.to_numeric(benchmark['Close'], errors='coerce').reindex(frame.index)
+    for days in (20, 60, 120):
+        stock_return = stock_close.pct_change(days, fill_method=None)
+        benchmark_return = benchmark_close.pct_change(days, fill_method=None)
+        frame[f'benchmark_return_{days}'] = benchmark_return
+        frame[f'relative_return_{days}'] = stock_return - benchmark_return
+    relative_daily = (
+        stock_close.pct_change(fill_method=None)
+        - benchmark_close.pct_change(fill_method=None)
+    )
+    relative_volatility = relative_daily.rolling(60, min_periods=60).std() * np.sqrt(60)
+    frame['relative_momentum_risk_adjusted_60'] = (
+        frame['relative_return_60'] / relative_volatility.replace(0, np.nan)
+    )
+    latest = frame.iloc[-1]
+    values = {name: latest.get(name) for name in MOMENTUM_FEATURES}
+    if not all(np.isfinite(values[name]) for name in MOMENTUM_FEATURES):
+        snapshot['reason'] = '市場基準與個股的最新120日完整行情不足'
+        return frame, list(BASE_FEATURES), snapshot
+    positives = sum(values[f'relative_return_{days}'] > 0 for days in (20, 60, 120))
+    label = {3: '強勢', 2: '偏強', 1: '偏弱', 0: '弱勢'}[positives]
+    snapshot.update({'available': True, 'label': label, 'reason': '可用', **values})
+    return frame, list(FEATURES), snapshot
 
 
 def atr_barrier_labels(prices, feature_frame, cfg):
@@ -53,8 +94,10 @@ def _sequences(features, sequence_length):
     return output
 
 
-def samples(prices, features, cfg):
-    x = features[FEATURES].replace([np.inf, -np.inf], np.nan)
+def samples(prices, features, cfg, benchmark=None, benchmark_name='市場指數'):
+    features, active_features, momentum_snapshot = add_momentum_features(
+        prices, features, benchmark, benchmark_name)
+    x = features[active_features].replace([np.inf, -np.inf], np.nan)
     labels = atr_barrier_labels(prices, features, cfg)
     sequence_map = _sequences(x, int(cfg['sequence_length']))
     ready = pd.Series(False, index=x.index)
@@ -65,8 +108,8 @@ def samples(prices, features, cfg):
     data['target_id'] = data.target.map({name: i for i, name in enumerate(CLASSES)}).astype(int)
     latest = x.tail(1)
     if latest.empty or latest.isna().any().any() or latest.index[0] not in sequence_map:
-        latest = pd.DataFrame(columns=FEATURES)
-    return data, latest, sequence_map
+        latest = pd.DataFrame(columns=active_features)
+    return data, latest, sequence_map, active_features, momentum_snapshot
 
 
 def partitions(data, cfg):
@@ -187,7 +230,7 @@ def _base_model(model_name, cfg, input_size):
     from sklearn.linear_model import LogisticRegression
     from sklearn.pipeline import make_pipeline
     from sklearn.preprocessing import StandardScaler
-    if model_name == 'logistic':
+    if model_name in {'logistic', 'momentum_benchmark'}:
         return make_pipeline(StandardScaler(), LogisticRegression(
             C=.1, max_iter=1500, class_weight='balanced', random_state=int(cfg['seed'])))
     if model_name == 'xgboost':
@@ -201,13 +244,17 @@ def _base_model(model_name, cfg, input_size):
     raise ValueError(f'未知模型：{model_name}')
 
 
-def _matrix(frame, model_name, sequence_map):
+def _model_features(model_name, active_features):
+    return list(MOMENTUM_FEATURES) if model_name == 'momentum_benchmark' else list(active_features)
+
+
+def _matrix(frame, model_name, sequence_map, feature_columns):
     if model_name == 'lstm':
         return np.stack([sequence_map[day] for day in frame.index])
-    return frame[FEATURES]
+    return frame[feature_columns]
 
 
-def fit_calibrated(train, infer, model_name, cfg, sequence_map):
+def fit_calibrated(train, infer, model_name, cfg, sequence_map, active_features):
     """Fit on old data, calibrate on a later block, and infer without leakage."""
     from sklearn.linear_model import LogisticRegression
     cal_n = int(cfg['calibration_size'])
@@ -219,18 +266,23 @@ def fit_calibrated(train, infer, model_name, cfg, sequence_map):
         raise ValueError('時間隔離後訓練樣本不足')
     if not _enough(fit.target_id, cfg['min_class_count']) or not _enough(cal.target_id, cfg['min_class_count']):
         raise ValueError('上行／下行／盤整樣本不足；不輸出假機率')
-    model = _base_model(model_name, cfg, len(FEATURES))
-    x_fit = _matrix(fit, model_name, sequence_map)
+    feature_columns = _model_features(model_name, active_features)
+    if not set(feature_columns).issubset(train.columns):
+        raise ValueError('Momentum Benchmark市場相對動能特徵不足')
+    model = _base_model(model_name, cfg, len(feature_columns))
+    x_fit = _matrix(fit, model_name, sequence_map, feature_columns)
     y_fit = fit.target_id.to_numpy(dtype=int)
     if model_name == 'xgboost':
         weights = _class_weights(y_fit)
         model.fit(x_fit, y_fit, sample_weight=weights[y_fit])
     else:
         model.fit(x_fit, y_fit)
-    cal_raw = np.clip(model.predict_proba(_matrix(cal, model_name, sequence_map)), 1e-7, 1)
+    cal_raw = np.clip(model.predict_proba(
+        _matrix(cal, model_name, sequence_map, feature_columns)), 1e-7, 1)
     calibrator = LogisticRegression(C=1., max_iter=1500, random_state=int(cfg['seed']))
     calibrator.fit(np.log(cal_raw), cal.target_id.astype(int))
-    raw = np.clip(model.predict_proba(_matrix(infer, model_name, sequence_map)), 1e-7, 1)
+    raw = np.clip(model.predict_proba(
+        _matrix(infer, model_name, sequence_map, feature_columns)), 1e-7, 1)
     probability = calibrator.predict_proba(np.log(raw))
     # Calibrator classes can only differ if validation was bypassed; normalize defensively.
     aligned = np.zeros((len(infer), len(CLASSES)))
@@ -242,6 +294,7 @@ def fit_calibrated(train, infer, model_name, cfg, sequence_map):
         'calibration_start': str(cal.index[0].date()),
         'calibration_end': str(cal.index[-1].date()),
         'fit_count': len(fit), 'calibration_count': len(cal),
+        'feature_count': len(feature_columns), 'features': ','.join(feature_columns),
     }
     return aligned, baseline, meta
 
@@ -310,10 +363,70 @@ def calibration_bins(predictions):
     return pd.DataFrame(rows)
 
 
-def run_ai(prices, feature_frame, config):
+def model_comparison(metrics):
+    """Rank models on the same untouched final-test block."""
+    if metrics.empty:
+        return pd.DataFrame()
+    frame = metrics.loc[(metrics.period == 'final_test') & (metrics.fold == 0)].copy()
+    if frame.empty:
+        return frame
+    frame['log_loss_rank'] = frame.log_loss.rank(method='min', ascending=True)
+    frame['brier_rank'] = frame.brier.rank(method='min', ascending=True)
+    frame['macro_f1_rank'] = frame.macro_f1.rank(method='min', ascending=False)
+    frame['mean_rank'] = frame[['log_loss_rank', 'brier_rank', 'macro_f1_rank']].mean(axis=1)
+    frame['comparison_basis'] = '相同126交易日final_test；低LogLoss／低Brier／高MacroF1'
+    columns = [
+        'overall_rank', 'model', 'samples', 'accuracy', 'balanced_accuracy',
+        'macro_f1', 'log_loss', 'brier', 'macro_average_precision',
+        'confident_50pct_count', 'confident_50pct_accuracy', 'mean_rank',
+        'log_loss_rank', 'brier_rank', 'macro_f1_rank', 'test_start', 'test_end',
+        'feature_count', 'features', 'comparison_basis',
+    ]
+    frame = frame.sort_values(
+        ['mean_rank', 'log_loss', 'brier', 'macro_f1'],
+        ascending=[True, True, True, False], na_position='last').reset_index(drop=True)
+    frame['overall_rank'] = pd.Series(np.arange(1, len(frame) + 1), dtype='Int64')
+    return frame.reindex(columns=columns)
+
+
+def summarize_model_metrics(metrics):
+    """Weighted cross-stock summary; descriptive because stocks share market dates."""
+    if metrics.empty:
+        return pd.DataFrame()
+    frame = metrics.loc[(metrics.period == 'final_test') & (metrics.fold == 0)].copy()
+    if frame.empty:
+        return pd.DataFrame()
+    rows = []
+    measures = ['accuracy', 'balanced_accuracy', 'macro_f1', 'log_loss', 'brier',
+                'macro_average_precision', 'confident_50pct_accuracy']
+    for model, group in frame.groupby('model', sort=False):
+        row = {'model': model, 'stocks': int(group['代號'].nunique()) if '代號' in group else len(group),
+               'samples': int(pd.to_numeric(group.samples, errors='coerce').fillna(0).sum())}
+        weights = pd.to_numeric(group.samples, errors='coerce').fillna(0).to_numpy(dtype=float)
+        for measure in measures:
+            values = pd.to_numeric(group[measure], errors='coerce').to_numpy(dtype=float)
+            valid = np.isfinite(values) & (weights > 0)
+            row[measure] = float(np.average(values[valid], weights=weights[valid])) if valid.any() else np.nan
+        rows.append(row)
+    result = pd.DataFrame(rows)
+    result['log_loss_rank'] = result.log_loss.rank(method='min', ascending=True)
+    result['brier_rank'] = result.brier.rank(method='min', ascending=True)
+    result['macro_f1_rank'] = result.macro_f1.rank(method='min', ascending=False)
+    result['mean_rank'] = result[['log_loss_rank', 'brier_rank', 'macro_f1_rank']].mean(axis=1)
+    result['note'] = 'final_test依樣本數加權；跨股票共用市場日期，僅供模型比較'
+    result = result.sort_values(
+        ['mean_rank', 'log_loss', 'brier', 'macro_f1'],
+        ascending=[True, True, True, False], na_position='last').reset_index(drop=True)
+    result['overall_rank'] = pd.Series(np.arange(1, len(result) + 1), dtype='Int64')
+    return result
+
+
+def run_ai(prices, feature_frame, config, benchmark=None):
     cfg = config['ai']
     empty = {'latest': pd.DataFrame(), 'metrics': pd.DataFrame(), 'predictions': pd.DataFrame(),
-             'calibration': pd.DataFrame(), 'status': '停用', 'errors': []}
+             'calibration': pd.DataFrame(), 'comparison': pd.DataFrame(),
+             'momentum_snapshot': {'available': False, 'label': '資料不足'},
+             'status': '停用', 'errors': []}
     if not cfg['enabled']:
         return empty
     if prices is None:
@@ -324,20 +437,29 @@ def run_ai(prices, feature_frame, config):
     except ImportError:
         empty['status'] = '未安裝scikit-learn；規則分析仍可用'
         return empty
-    data, latest, sequence_map = samples(prices, feature_frame, cfg)
+    benchmark_name = config.get('data', {}).get('benchmark', '市場指數')
+    data, latest, sequence_map, active_features, momentum_snapshot = samples(
+        prices, feature_frame, cfg, benchmark, benchmark_name)
+    empty['momentum_snapshot'] = momentum_snapshot
     if latest.empty:
         empty['status'] = '最新日特徵不足，未使用較舊日期代替'
         return empty
     parts = partitions(data, cfg)
     errors, prediction_frames, metrics, now_rows = [], [], [], []
     ensemble_models = list(cfg.get('ensemble_models', ['logistic', 'xgboost']))
+    momentum_ready = bool(momentum_snapshot.get('available'))
+    if 'momentum_benchmark' in cfg['models'] and not momentum_ready:
+        errors.append('momentum_benchmark: 市場基準與相對動能資料不足；其他AI沿用原特徵')
     for period, fold, train, test in parts:
         fold_probabilities = {}
         for model_name in cfg['models']:
             if model_name == 'lstm' and period == 'walk_forward' and not cfg.get('lstm_walk_forward', False):
                 continue
+            if model_name == 'momentum_benchmark' and not momentum_ready:
+                continue
             try:
-                probability, baseline, meta = fit_calibrated(train, test, model_name, cfg, sequence_map)
+                probability, baseline, meta = fit_calibrated(
+                    train, test, model_name, cfg, sequence_map, active_features)
                 fold_probabilities[model_name] = probability
                 prediction_frames.append(_long_predictions(
                     test.index, test.target_id.to_numpy(), probability, baseline, period, fold, model_name))
@@ -361,8 +483,11 @@ def run_ai(prices, feature_frame, config):
     lower_barrier = signal_close - float(cfg['down_atr']) * signal_atr
     latest_probabilities = {}
     for model_name in cfg['models']:
+        if model_name == 'momentum_benchmark' and not momentum_ready:
+            continue
         try:
-            probability, baseline, meta = fit_calibrated(mature, latest, model_name, cfg, sequence_map)
+            probability, baseline, meta = fit_calibrated(
+                mature, latest, model_name, cfg, sequence_map, active_features)
             latest_probabilities[model_name] = probability[0]
             for idx, class_name in enumerate(CLASSES):
                 now_rows.append({
@@ -372,7 +497,8 @@ def run_ai(prices, feature_frame, config):
                     'up_atr': float(cfg['up_atr']), 'down_atr': float(cfg['down_atr']),
                     'signal_close': signal_close, 'signal_atr': signal_atr,
                     'upper_barrier': upper_barrier, 'lower_barrier': lower_barrier,
-                    'ensemble_role': 'baseline' if model_name in ensemble_models else 'challenger',
+                    'ensemble_role': ('baseline' if model_name in ensemble_models else
+                                      'comparison_benchmark' if model_name == 'momentum_benchmark' else 'challenger'),
                     'status': '研究參考，不參與交易建議', **meta,
                 })
         except (ImportError, ValueError, RuntimeError) as exc:
@@ -391,10 +517,14 @@ def run_ai(prices, feature_frame, config):
                 'status': 'Logistic與XGBoost等權平均；研究參考，不參與交易建議',
             })
     predictions = pd.concat(prediction_frames, ignore_index=True) if prediction_frames else pd.DataFrame()
+    metrics_frame = pd.DataFrame(metrics)
+    comparison = model_comparison(metrics_frame)
     if any(row['model'] == 'ensemble' for row in now_rows):
         lstm_ready = any(row['model'] == 'lstm' for row in now_rows)
         status = ('三分類研究機率已產生；LSTM挑戰模型已完成；不參與交易建議' if lstm_ready
                   else '三分類基準機率已產生；LSTM挑戰模型未完成，詳見AIStatus；不參與交易建議')
+        status += ('；Momentum Benchmark已納入同區間比較' if momentum_ready
+                   else '；Momentum Benchmark資料不足')
     elif now_rows:
         status = '個別模型有結果但基準集成未成立；機率不顯示'
     else:
@@ -408,7 +538,8 @@ def run_ai(prices, feature_frame, config):
         if metrics:
             status += '；已有部分歷史評估'
     return {
-        'latest': pd.DataFrame(now_rows), 'metrics': pd.DataFrame(metrics),
+        'latest': pd.DataFrame(now_rows), 'metrics': metrics_frame,
         'predictions': predictions, 'calibration': calibration_bins(predictions),
+        'comparison': comparison, 'momentum_snapshot': momentum_snapshot,
         'errors': errors, 'status': status,
     }

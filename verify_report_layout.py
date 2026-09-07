@@ -57,6 +57,8 @@ def _empty_result() -> dict:
         "equity": empty,
         "ai_latest": empty,
         "ai_metrics": empty,
+        "ai_comparison": empty,
+        "ai_model_summary": empty,
         "ai_calibration": empty,
         "ai_status": empty,
         "ai_predictions": empty,

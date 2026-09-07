@@ -10,10 +10,10 @@ import pandas as pd
 
 from timing_data import (VERSION, Provider, candidates, load_config, number, read_holdings)
 from timing_rules import signals, latest_assessment, compare_strategies, market_sentiment, news_sentiment
-from timing_ai import run_ai
+from timing_ai import run_ai, summarize_model_metrics
 
-SIMPLE_COLUMNS=['代號','訊號日期','現價','短期趨勢','中期趨勢','長期趨勢','籌碼','籌碼K線','市場情緒','個股情緒','融資壓力','新聞情緒','風險','未持有建議','持有情境建議',
-    'ATR風險參考價','支撐參考','壓力參考','AI上行先觸機率','AI下行先觸機率','AI盤整機率','AI狀態','資料狀態']
+SIMPLE_COLUMNS=['代號','訊號日期','現價','短期趨勢','中期趨勢','長期趨勢','相對大盤動能','籌碼','籌碼K線','市場情緒','個股情緒','融資壓力','新聞情緒','風險','未持有建議','持有情境建議',
+    'ATR風險參考價','支撐參考','壓力參考','AI同區間最佳模型','AI上行先觸機率','AI下行先觸機率','AI盤整機率','AI狀態','資料狀態']
 
 
 def safe_json(value):
@@ -58,7 +58,9 @@ def export_reports(result, cfg):
         {'分類':'限制','設定':'融資維持率','值':'公開資料無法還原投資人帳戶擔保品與負債，因此只顯示個股與大盤融資壓力，不冒充實際維持率'},
         {'分類':'限制','設定':'券商分點','值':'FinMind sponsor限定；無權限時自動降級，主要買超分點均價不是CMoney主力成本'},
         {'分類':'說明','設定':'AI目標','值':'未來10個交易日先觸及上方1.5倍ATR、下方1.0倍ATR，或期間內兩者皆未觸及；同日雙觸採下方'},
-        {'分類':'限制','設定':'AI決策','值':'所有AI機率只作研究參考，未用於交易建議；LSTM為挑戰模型，不加入正式集成'},
+        {'分類':'說明','設定':'Momentum Benchmark','值':'TAIEX 20/60/120日報酬、個股相對TAIEX報酬與60日風險調整動能；同時作為所有AI的新特徵及獨立比較模型'},
+        {'分類':'說明','設定':'AI模型比較','值':'AIComparison以相同126交易日final_test，綜合低LogLoss、低Brier與高MacroF1排名；AIModelSummary依樣本數彙總全部股票'},
+        {'分類':'限制','設定':'AI決策','值':'所有AI機率與Momentum Benchmark只作研究參考，未用於交易建議；LSTM與Momentum Benchmark不加入正式集成'},
         {'分類':'限制','設定':'回測','值':'固定候選名單的單檔研究，不是WHID歷史選股或投資組合績效'},
         {'分類':'限制','設定':'成交','值':'前日訊號下一日開盤；同日雙觸價採停損優先；零量/一價日不成交'},
         {'分類':'限制','設定':'價格','值':'還原價、分數股與股息再投資研究假設；未模擬實際張數/最低手續費'},
@@ -68,7 +70,8 @@ def export_reports(result, cfg):
     ])
     sheets={'Report':result['detail'],'DataStatus':result['data_status'],'Backtest':result['backtest'],
         'Trades':result['trades'],'Equity':result['equity'],'AILatest':result['ai_latest'],
-        'AIMetrics':result['ai_metrics'],'AICalibration':result['ai_calibration'],'AIStatus':result['ai_status'],
+        'AIMetrics':result['ai_metrics'],'AIComparison':result['ai_comparison'],
+        'AIModelSummary':result['ai_model_summary'],'AICalibration':result['ai_calibration'],'AIStatus':result['ai_status'],
         'News':result['news'],'MarketContext':result['market_context'],
         'Rules':pd.DataFrame(rules),'CandidateSource':pd.DataFrame([result['provenance']]),
         'Candidates':result['candidates']}
@@ -103,7 +106,7 @@ def export_reports(result, cfg):
 
 
 def analyze_bundle(ticker, candidate, raw, adjusted, chips, meta, cfg, provenance, asof, holding=None,
-                   market_summary=None, news_summary=None):
+                   market_summary=None, news_summary=None, benchmark=None):
     x=signals(raw,adjusted,chips,cfg)
     row=latest_assessment(ticker,raw,adjusted,x,cfg,provenance,asof,holding)
     for col,value in candidate.items():
@@ -114,9 +117,22 @@ def analyze_bundle(ticker, candidate, raw, adjusted, chips, meta, cfg, provenanc
     stale=(pd.Timestamp(asof).normalize()-raw.index[-1]).days>cfg['data']['max_price_age_days']
     if stale:
         ai={'latest':pd.DataFrame(),'metrics':pd.DataFrame(),'calibration':pd.DataFrame(),
+            'comparison':pd.DataFrame(),'momentum_snapshot':{'available':False,'label':'資料不足'},
             'predictions':pd.DataFrame(),'errors':[],'status':'行情過期，AI未執行'}
-    else: ai=run_ai(adjusted,x,cfg)
+    else: ai=run_ai(adjusted,x,cfg,benchmark)
     row['AI狀態']=ai['status']
+    momentum=ai.get('momentum_snapshot',{})
+    row['動能基準']=momentum.get('benchmark',cfg['data'].get('benchmark','TAIEX'))
+    row['相對大盤動能']=momentum.get('label','資料不足')
+    row['相對大盤20日報酬差']=momentum.get('relative_return_20',np.nan)
+    row['相對大盤60日報酬差']=momentum.get('relative_return_60',np.nan)
+    row['相對大盤120日報酬差']=momentum.get('relative_return_120',np.nan)
+    row['大盤20日報酬率']=momentum.get('benchmark_return_20',np.nan)
+    row['大盤60日報酬率']=momentum.get('benchmark_return_60',np.nan)
+    row['大盤120日報酬率']=momentum.get('benchmark_return_120',np.nan)
+    row['60日風險調整相對動能']=momentum.get('relative_momentum_risk_adjusted_60',np.nan)
+    comparison=ai.get('comparison',pd.DataFrame())
+    row['AI同區間最佳模型']=(comparison.iloc[0]['model'] if not comparison.empty else '資料不足')
     for col in ['AI上行先觸機率','AI下行先觸機率','AI盤整機率']: row[col]=np.nan
     row['AI預測期間']=cfg['ai']['horizon']; row['AI上方ATR倍數']=cfg['ai']['up_atr']; row['AI下方ATR倍數']=cfg['ai']['down_atr']
     row['AI目標定義']='未來10日ATR先觸價；同日雙觸採下方'
@@ -128,6 +144,8 @@ def analyze_bundle(ticker, candidate, raw, adjusted, chips, meta, cfg, provenanc
         b,t,e=compare_strategies(raw,adjusted,x,cfg)
     else: b,t,e=pd.DataFrame(),pd.DataFrame(),pd.DataFrame()
     source={'代號':ticker,**meta,'原始列數':len(raw),'還原列數':len(adjusted) if adjusted is not None else 0,
+        '動能基準':cfg['data'].get('benchmark','TAIEX'),'動能基準列數':len(benchmark) if benchmark is not None else 0,
+        '動能基準資料狀態':momentum.get('reason','資料不足'),
         '法人籌碼記錄數':len(chips),'融資融券記錄數':len(chips.attrs.get('margin',[])),
         '借券記錄數':len(chips.attrs.get('lending',[])),'券商分點記錄數':len(chips.attrs.get('branches',[])),
         '最後行情日':str(raw.index[-1].date()),'最後籌碼可用':bool(x.chip_ready.iloc[-1]),
@@ -149,11 +167,15 @@ def run(config_path='config/timing_TW.yaml', provider=None, candidate_frame=None
     provenance.setdefault('第二階段執行日期台北',str(getattr(provider,'report_check_date',provider.asof).date()))
     provenance.setdefault('WHID日期比較規則','以台北日曆日比較WHID報表日期；不與最後交易日比較')
     holdings=read_holdings(cfg['candidates'].get('holdings_path'))
+    benchmark=None
+    if cfg['ai']['enabled']:
+        try:benchmark=provider.prices('TaiwanStockPrice',cfg['data'].get('benchmark','TAIEX'))
+        except Exception:benchmark=None
     market_summary=market_sentiment(None,cfg)
     if cfg['sentiment']['enabled'] and hasattr(provider,'market_context'):
         try:market_summary=market_sentiment(provider.market_context(),cfg)
         except Exception as exc:market_summary['市場情緒資料狀態']='資料不足：'+type(exc).__name__
-    buckets={k:[] for k in ['detail','data_status','ai_latest','ai_metrics','ai_calibration','ai_predictions',
+    buckets={k:[] for k in ['detail','data_status','ai_latest','ai_metrics','ai_comparison','ai_calibration','ai_predictions',
                             'ai_status','backtest','trades','equity','signals','news']}
     for i,candidate in enumerate(candidate_frame.to_dict('records'),1):
         ticker=candidate['代號']
@@ -166,9 +188,9 @@ def run(config_path='config/timing_TW.yaml', provider=None, candidate_frame=None
             if not scored_news.empty:buckets['news'].append(scored_news)
             raw,adjusted,chips,meta=provider.bundle(ticker)
             row,source,ai,b,t,e,s=analyze_bundle(ticker,candidate,raw,adjusted,chips,meta,cfg,provenance,provider.asof,
-                holdings.get(ticker),market_summary,news_summary)
+                holdings.get(ticker),market_summary,news_summary,benchmark)
             buckets['detail'].append(pd.DataFrame([row])); buckets['data_status'].append(pd.DataFrame([source]))
-            for key,df in [('ai_latest',ai['latest']),('ai_metrics',ai['metrics']),('ai_calibration',ai['calibration']),
+            for key,df in [('ai_latest',ai['latest']),('ai_metrics',ai['metrics']),('ai_comparison',ai['comparison']),('ai_calibration',ai['calibration']),
                 ('ai_predictions',ai['predictions']),('backtest',b),('trades',t),('equity',e)]:
                 if not df.empty: buckets[key].append(df.assign(代號=ticker))
             buckets['ai_status'].append(pd.DataFrame([{'代號':ticker,'狀態':ai['status'],'說明':'；'.join(ai['errors'])}]))
@@ -182,6 +204,7 @@ def run(config_path='config/timing_TW.yaml', provider=None, candidate_frame=None
             buckets['data_status'].append(pd.DataFrame([{'代號':ticker,'錯誤':reason}]))
             if progress: progress(f'{ticker} 未完成：{type(exc).__name__}；已保留失敗列')
     result={k:pd.concat(v,ignore_index=True) if v else pd.DataFrame() for k,v in buckets.items()}
+    result['ai_model_summary']=summarize_model_metrics(result['ai_metrics'])
     result['simple']=result['detail'].reindex(columns=SIMPLE_COLUMNS)
     result['market_context']=pd.DataFrame([market_summary])
     result['candidates']=candidate_frame.copy();result['provenance']=provenance

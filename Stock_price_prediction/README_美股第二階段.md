@@ -9,7 +9,7 @@
 3. `TICKERS=[]` 會讀取專案根目錄 `reports` 中路徑包含 `US` 的最新 WHID Excel，支援 Report 或舊版第一張工作表。目前 `max_stocks: null`，依原順序處理全部股票，**不會自動按「買進」篩選**。可填 `['AAPL', 'NVDA']`、將 `max_stocks` 改成正整數，或在 YAML 指定報表。
 4. 設定集中於 `config/timing_US.yaml`。若單獨解壓、沒有 WHID 報表，先手動填入代號。
 
-**更新程式後請從頭執行所有格。** Notebook 會使用目前專案的相對位置尋找 `Stock_price_prediction`，可以整包複製到其他資料夾測試，不綁定絕對路徑。它會印出實際資料模組路徑；請確認顯示的是本次測試副本。本次版本為 `US-timing-1.5`。
+**更新程式後請從頭執行所有格。** Notebook 會使用目前專案的相對位置尋找 `Stock_price_prediction`，可以整包複製到其他資料夾測試，不綁定絕對路徑。它會印出實際資料模組路徑；請確認顯示的是本次測試副本。本次版本為 `US-timing-1.6`。
 
 WHID 報表日期以台北日曆日檢查，不與紐約最後交易日或行情截止日比較。因此台北已進入新的一天、紐約尚未收盤，或遇到週末休市時，不會把剛產生的 WHID 報表誤判成日期異常。詳細版會保留 `WHID名單日齡`、`WHID日期比較基準` 與 `WHID日期判定`。
 
@@ -55,13 +55,15 @@ Logistic、XGBoost 與小型 LSTM 使用相同樣本，研究未來10個交易�
 
 訓練、校準與驗證按時間切分，切分邊界排除尚未成熟標籤，最後測試區間單獨保留。每類樣本不足會跳過該模型／期間，不放寬門檻湊出機率。基準 ensemble 固定由 Logistic 與 XGBoost 組成；LSTM 是挑戰模型。AI 完全不介入規則交易建議。
 
-詳細版保留 AIMetrics、AICalibration、AIStatus，供檢查三分類樣本數、macro F1、log loss、Brier 與各類 precision／recall。沒有通過足夠樣本外驗證前，不應把機率當成有效交易依據。
+`US-timing-1.6` 將 SPY 20／60／120日報酬、個股相對 SPY 20／60／120日報酬與60日風險調整相對動能加入所有正式AI特徵。另有 `momentum_benchmark`，只使用這七項動能特徵，作為透明的 Logistic 比較基準。SPY資料不足時，其他模型沿用原本價量特徵，只有 Momentum Benchmark停用。
+
+詳細版保留 AIMetrics、AIComparison、AIModelSummary、AICalibration及AIStatus。`AIComparison`讓 Logistic、XGBoost、LSTM、Momentum Benchmark與Ensemble在相同126交易日final test比較，以低 Log Loss、低 Brier及高 Macro F1排名；`AIModelSummary`再依樣本數彙總全部股票。沒有通過足夠樣本外驗證前，不應把機率當成有效交易依據。
 
 ## 報表與獨立性
 
 每次產出兩份 Excel，資料夾完全分開：
 
-- `reports/簡化版/US/US_日期_時間_Step2_Report.xlsx`：保留短、中、長期趨勢、時機結論、風險參考價與三分類 AI 研究機率。
+- `reports/簡化版/US/US_日期_時間_Step2_Report.xlsx`：保留短、中、長期趨勢、相對SPY動能、同區間最佳模型、時機結論、風險參考價與三分類AI研究機率。
 - `reports/詳細版/US/US_日期_時間_Step2_Report.xlsx`：原始 WHID 欄位加上來源、依據、回測、交易紀錄與 AI 評估。
 - `system_data/research/US/`：設定快照、逐日訊號與可用的樣本外機率。
 - `system_data/cache/US`：公開行情快取，預設 12 小時。
