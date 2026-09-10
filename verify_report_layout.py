@@ -24,6 +24,7 @@ def verify_notebooks() -> dict:
     files = [
         PROJECT / "Stock_Valuation_ReDesgin_TW.ipynb",
         PROJECT / "Stock_Valuation_ReDesgin_US.ipynb",
+        PROJECT / "Stock_Valuation_SMART.ipynb",
         MODULE_ROOT / "TW_Timing_第二階段.ipynb",
         MODULE_ROOT / "US_Timing_第二階段.ipynb",
     ]
@@ -42,6 +43,51 @@ def verify_notebooks() -> dict:
             "step1_naming": ("Step1_Report.xlsx" in "\n".join(sources))
                 if "ReDesgin" in path.name else None,
         }
+    return result
+
+
+def verify_historical_pe_migration() -> dict:
+    files = [
+        PROJECT / "Stock_Valuation_ReDesgin_TW.ipynb",
+        PROJECT / "Stock_Valuation_ReDesgin_US.ipynb",
+        PROJECT / "Stock_Valuation_SMART.ipynb",
+    ]
+    required = {
+        "historical_pe_median_1y",
+        "historical_pe_percentile_1y",
+        "historical_pe_median_3y",
+        "historical_pe_percentile_3y",
+        "historical_pe_median_5y",
+        "historical_pe_percentile_5y",
+        "pe_median_trend_1y_vs_3y",
+        "pe_median_trend_1y_vs_5y",
+    }
+    forbidden = {
+        "historical_pe_percentile": re.compile(r"\bhistorical_pe_percentile\b"),
+        "pe_percentile_5y": re.compile(r"\bpe_percentile_5y\b"),
+        "nowcast_pe_percentile": re.compile(r"\bnowcast_pe_percentile\b"),
+        "valuation_score": re.compile(r"\bvaluation_score\b"),
+        "Valuation Percentile": re.compile(r'"Valuation Percentile"'),
+        "Price Recommendation": re.compile(r'"Price Recommendation"'),
+    }
+    result = {}
+    for path in files:
+        notebook = json.loads(path.read_text(encoding="utf-8"))
+        source = "\n".join(
+            "".join(cell.get("source", []))
+            for cell in notebook["cells"]
+            if cell.get("cell_type") == "code"
+        )
+        missing = sorted(name for name in required if name not in source)
+        legacy = sorted(name for name, pattern in forbidden.items() if pattern.search(source))
+        if missing or legacy:
+            raise AssertionError({"notebook": path.name, "missing": missing, "legacy": legacy})
+        score_block = source[source.index("def total_score("):source.index("class BuffettChecklist")]
+        if (re.search(r"\bvaluation\s*:", score_block)
+                or 'weights["valuation"]' in score_block
+                or "historical_pe" in score_block.lower()):
+            raise AssertionError(f"{path.name} Fundamental Score still references valuation")
+        result[path.name] = {"required_fields": len(required), "legacy_references": 0}
     return result
 
 
@@ -146,6 +192,7 @@ def verify_database() -> dict:
 def main() -> None:
     result = {
         "notebooks": verify_notebooks(),
+        "historical_pe": verify_historical_pe_migration(),
         "export_functions": verify_export_functions(),
         "existing_layout": verify_existing_layout(),
         "database": verify_database(),
