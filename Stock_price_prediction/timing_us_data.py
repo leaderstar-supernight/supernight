@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
-VERSION='US-timing-1.7'
+VERSION='US-timing-1.8'
 NY=ZoneInfo('America/New_York')
 TAIPEI=ZoneInfo('Asia/Taipei')
 

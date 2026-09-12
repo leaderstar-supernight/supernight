@@ -12,7 +12,7 @@ import pandas as pd
 import requests
 import yaml
 
-VERSION = 'TW-timing-1.7'
+VERSION = 'TW-timing-1.8'
 TW_ZONE = timezone(timedelta(hours=8))
 
 

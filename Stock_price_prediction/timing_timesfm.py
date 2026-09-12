@@ -24,6 +24,9 @@ def summary_columns(market: str) -> list[str]:
     price = "TimesFM第10日預測價USD" if market == "US" else "TimesFM第10日預測價"
     return [
         "TimesFM10日路徑判讀",
+        "TimesFM估計上行先觸機率",
+        "TimesFM估計下行先觸機率",
+        "TimesFM估計盤整機率",
         price,
         "TimesFM10日預測漲跌幅",
         "TimesFM預估觸及日",
@@ -35,6 +38,10 @@ def _empty_summary(market: str, status: str, model_id: str | None = None) -> dic
     price = "TimesFM第10日預測價USD" if market == "US" else "TimesFM第10日預測價"
     return {
         "TimesFM10日路徑判讀": "資料不足",
+        "TimesFM估計上行先觸機率": np.nan,
+        "TimesFM估計下行先觸機率": np.nan,
+        "TimesFM估計盤整機率": np.nan,
+        "TimesFM機率方法": "資料不足",
         price: np.nan,
         "TimesFM10日預測漲跌幅": np.nan,
         "TimesFM預估觸及日": "資料不足",
@@ -98,6 +105,24 @@ def _classify_path(
         if value >= upper:
             return "up_first", step
     return "neutral", None
+
+
+def _quantile_class_probabilities(
+    quantile_paths: np.ndarray, upper: float, lower: float
+) -> dict[str, float]:
+    """Approximate class probabilities from equally spaced quantile paths.
+
+    TimesFM returns marginal 0.1--0.9 quantiles rather than joint path samples.
+    Following the same quantile level through time is therefore a scenario,
+    not a native probabilistic trajectory.  Equal scenario shares are useful
+    for calibration research but must remain labelled as estimates.
+    """
+    paths = np.asarray(quantile_paths, dtype=float)
+    if paths.ndim != 2 or paths.shape[1] < 2:
+        raise ValueError("TimesFM分位路徑形狀錯誤")
+    classes = [_classify_path(paths[:, index], upper, lower)[0]
+               for index in range(paths.shape[1])]
+    return {name: classes.count(name) / len(classes) for name in CLASS_ZH}
 
 
 class TimesFMPathRunner:
@@ -198,9 +223,7 @@ class TimesFMPathRunner:
             raise RuntimeError("模型回傳形狀錯誤")
         scale = close_raw / 100.0
         point_raw = point * scale
-        q10 = quantiles[:, 0] * scale
-        q50 = quantiles[:, 4] * scale
-        q90 = quantiles[:, 8] * scale
+        quantile_paths_raw = quantiles * scale
 
         atr_adjusted = _atr_on_adjusted(
             adjusted.loc[:signal_date], int(self.settings.get("atr_period", 14))
@@ -212,17 +235,24 @@ class TimesFMPathRunner:
         upper = close_raw + float(self.ai["up_atr"]) * atr_raw
         lower = close_raw - float(self.ai["down_atr"]) * atr_raw
         path_class, hit_step = _classify_path(point_raw, upper, lower)
+        estimated_probability = _quantile_class_probabilities(
+            quantile_paths_raw, upper, lower
+        )
         price_column = (
             "TimesFM第10日預測價USD" if self.market == "US" else "TimesFM第10日預測價"
         )
         summary = {
             "TimesFM10日路徑判讀": CLASS_ZH[path_class],
+            "TimesFM估計上行先觸機率": estimated_probability["up_first"],
+            "TimesFM估計下行先觸機率": estimated_probability["down_first"],
+            "TimesFM估計盤整機率": estimated_probability["neutral"],
+            "TimesFM機率方法": "0.1至0.9共9條分位路徑等權情境占比；非原生分類機率",
             price_column: float(point_raw[-1]),
             "TimesFM10日預測漲跌幅": float(point_raw[-1] / close_raw - 1),
             "TimesFM預估觸及日": (
                 "10日內未觸及" if hit_step is None else f"第{hit_step}交易日"
             ),
-            "TimesFM狀態": "可用；價格路徑研究，不參與AI集成或交易建議",
+            "TimesFM狀態": "可用；含分位情境機率估計，不參與AI集成或交易建議",
             "TimesFM模型": self.model_id,
             "TimesFM訊號日期": signal_date,
             "TimesFM上方ATR門檻": upper,
@@ -239,9 +269,8 @@ class TimesFMPathRunner:
                 "交易日序": np.arange(1, horizon + 1),
                 "預估日期（未排休市）": estimated_dates,
                 "TimesFM點預測": point_raw,
-                "Q10": q10,
-                "Q50": q50,
-                "Q90": q90,
+                **{f"Q{(index + 1) * 10}": quantile_paths_raw[:, index]
+                   for index in range(quantile_paths_raw.shape[1])},
                 "上方ATR門檻": upper,
                 "下方ATR門檻": lower,
                 "10日路徑判讀": CLASS_ZH[path_class],
