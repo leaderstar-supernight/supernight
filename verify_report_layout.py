@@ -63,6 +63,19 @@ def verify_historical_pe_migration() -> dict:
         "historical_pe_percentile_5y",
         "pe_median_trend_1y_vs_3y",
         "pe_median_trend_1y_vs_5y",
+        "historical_pe_window_stats",
+        "historical_pb_window_stats",
+        "historical_reference_period",
+        "historical_reference_percentile",
+        "historical_median_price_1y",
+        "historical_median_price_3y",
+        "historical_median_price_5y",
+        "valuation_eps_base",
+        "ttm_eps_fair_price",
+        "estimated_eps_fair_price",
+        "model_earnings_basis",
+        '"Price Recommendation"',
+        '"Price Recommendation Basis"',
     }
     forbidden = {
         "historical_pe_percentile": re.compile(r"\bhistorical_pe_percentile\b"),
@@ -70,7 +83,15 @@ def verify_historical_pe_migration() -> dict:
         "nowcast_pe_percentile": re.compile(r"\bnowcast_pe_percentile\b"),
         "valuation_score": re.compile(r"\bvaluation_score\b"),
         "Valuation Percentile": re.compile(r'"Valuation Percentile"'),
-        "Price Recommendation": re.compile(r'"Price Recommendation"'),
+        "Buy Price Recommendation": re.compile(r'"Buy Price Recommendation"'),
+        "買價投資建議": re.compile(r'買價投資建議'),
+        "historical_pe_stats": re.compile(r"\bhistorical_pe_stats\b"),
+        "historical_pb_stats": re.compile(r"\bhistorical_pb_stats\b"),
+        "historical_pe legacy average": re.compile(r"\bhistorical_pe\b"),
+        "historical_pb legacy average": re.compile(r"\bhistorical_pb\b"),
+        "_windowed_averages": re.compile(r"\b_windowed_averages\b"),
+        "_historical_ratio_statistics": re.compile(r"\b_historical_ratio_statistics\b"),
+        "_fair_multiple": re.compile(r"\b_fair_multiple\b"),
     }
     result = {}
     for path in files:
