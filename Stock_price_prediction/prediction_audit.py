@@ -14,7 +14,16 @@ BASE = Path(__file__).resolve().parent
 PROJECT = BASE.parent
 VALIDATION_ROOT = PROJECT / 'system_data' / 'validation'
 DB_PATH = VALIDATION_ROOT / 'prediction_audit.sqlite3'
+REVIEW_ROOT = PROJECT / 'reports' / '30日評估'
 CLASS_ORDER = ['down_first', 'neutral', 'up_first']
+TIMESFM_CLASS_MAP = {
+    '下行先觸': 'down_first',
+    '盤整': 'neutral',
+    '上行先觸': 'up_first',
+    'down_first': 'down_first',
+    'neutral': 'neutral',
+    'up_first': 'up_first',
+}
 
 
 def _json_value(value):
@@ -395,6 +404,91 @@ def _ai_tables(frame):
     return pd.DataFrame(rows), pd.DataFrame(calibration)
 
 
+def _timesfm_table(frame):
+    """Evaluate TimesFM's hard path class and 10-day point return separately.
+
+    TimesFM does not emit calibrated three-class probabilities, so Log Loss,
+    Brier score, and probability calibration are intentionally not calculated.
+    """
+    columns = [
+        '市場', '模型', '成熟樣本', '正確率', '多數類基準正確率', '相對基準差',
+        '平衡正確率', 'Macro F1', '下行先觸召回率', '盤整召回率',
+        '上行先觸召回率', '10日預測報酬MAE', '10日預測報酬RMSE',
+        '10日預測報酬偏誤', '10日方向命中率', '預測與實際報酬Spearman', '判定',
+    ]
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+    from scipy.stats import spearmanr
+    from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, recall_score
+
+    records = []
+    for _, outcome in frame.reset_index(drop=True).iterrows():
+        try:
+            snapshot = json.loads(outcome.snapshot_json)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        predicted_class = TIMESFM_CLASS_MAP.get(str(snapshot.get('TimesFM10日路徑判讀', '')).strip())
+        actual_class = str(outcome.get('actual_class', '')).strip()
+        status_text = str(snapshot.get('TimesFM狀態', ''))
+        if predicted_class is None or actual_class not in CLASS_ORDER or '可用' not in status_text:
+            continue
+        records.append({
+            'market': outcome.market,
+            'model': str(snapshot.get('TimesFM模型') or 'TimesFM'),
+            'predicted_class': predicted_class,
+            'actual_class': actual_class,
+            'predicted_return': _number(snapshot.get('TimesFM10日預測漲跌幅')),
+            'actual_return': _number(outcome.get('return_10')),
+        })
+    samples = pd.DataFrame(records)
+    if samples.empty:
+        return pd.DataFrame(columns=columns)
+
+    rows = []
+    label_map = {name: i for i, name in enumerate(CLASS_ORDER)}
+    for (market, model), group in samples.groupby(['market', 'model'], dropna=False):
+        y = group.actual_class.map(label_map).to_numpy(dtype=int)
+        pred = group.predicted_class.map(label_map).to_numpy(dtype=int)
+        accuracy = float(accuracy_score(y, pred))
+        majority_accuracy = float(pd.Series(y).value_counts(normalize=True).max())
+        recalls = recall_score(y, pred, labels=[0, 1, 2], average=None, zero_division=0)
+        point = group.dropna(subset=['predicted_return', 'actual_return']).copy()
+        if point.empty:
+            mae = rmse = bias = direction = rho = np.nan
+        else:
+            error = point.predicted_return - point.actual_return
+            mae = float(error.abs().mean())
+            rmse = float(np.sqrt(np.mean(np.square(error))))
+            bias = float(error.mean())
+            direction = float((np.sign(point.predicted_return) == np.sign(point.actual_return)).mean())
+            rho = np.nan
+            if len(point) >= 3 and point.predicted_return.nunique() > 1 and point.actual_return.nunique() > 1:
+                rho = float(spearmanr(point.predicted_return, point.actual_return).statistic)
+        balanced = (float(balanced_accuracy_score(y, pred))
+                    if len(np.unique(y)) > 1 else np.nan)
+        verdict = '資料不足'
+        if len(group) >= 30:
+            if np.isfinite(balanced) and balanced >= .40 and accuracy > majority_accuracy:
+                verdict = '初步有參考性'
+            elif accuracy > majority_accuracy:
+                verdict = '有區辨力；類別平衡需觀察'
+            else:
+                verdict = '未優於多數類基準；需修正'
+        rows.append({
+            '市場': market, '模型': model, '成熟樣本': len(group),
+            '正確率': accuracy, '多數類基準正確率': majority_accuracy,
+            '相對基準差': accuracy - majority_accuracy,
+            '平衡正確率': balanced,
+            'Macro F1': float(f1_score(y, pred, labels=[0, 1, 2], average='macro', zero_division=0)),
+            '下行先觸召回率': float(recalls[0]), '盤整召回率': float(recalls[1]),
+            '上行先觸召回率': float(recalls[2]), '10日預測報酬MAE': mae,
+            '10日預測報酬RMSE': rmse, '10日預測報酬偏誤': bias,
+            '10日方向命中率': direction, '預測與實際報酬Spearman': rho,
+            '判定': verdict,
+        })
+    return pd.DataFrame(rows, columns=columns)
+
+
 POSITIVE = ('買進', '強買', '偏多', '多頭', '強勢', '偏強', '正向', '安全', '優良', '增加', '成長', '低')
 NEGATIVE = ('賣出', '減碼', '偏空', '空頭', '轉弱', '弱勢', '偏弱', '危險', '過熱', '衰退', '高')
 CATEGORY_HINTS = ('短期趨勢', '中期趨勢', '長期趨勢', '籌碼', '量價參考', '市場環境', '市場情緒',
@@ -505,6 +599,12 @@ def _indicator_tables(frame):
     return pd.DataFrame(categorical_rows), pd.DataFrame(numeric_rows)
 
 
+def review_output_path(now=None, root=REVIEW_ROOT):
+    current = now or datetime.now()
+    folder = Path(root) / current.strftime('%Y') / current.strftime('%m')
+    return folder / f"WHID_30日驗證_{current.strftime('%Y%m%d_%H%M%S')}.xlsx"
+
+
 def build_review(db_path=DB_PATH, minimum_calendar_days=30):
     connection = connect(db_path)
     forecasts = pd.read_sql_query(
@@ -517,6 +617,7 @@ def build_review(db_path=DB_PATH, minimum_calendar_days=30):
         FROM indicators GROUP BY market''', connection)
     connection.close()
     ai, calibration = _ai_tables(forecasts)
+    timesfm = _timesfm_table(indicators)
     categorical, numeric = _indicator_tables(indicators)
     span_days = 0
     if not coverage.empty:
@@ -525,6 +626,7 @@ def build_review(db_path=DB_PATH, minimum_calendar_days=30):
     overview = pd.DataFrame([
         {'項目': '資料狀態', '結果': readiness},
         {'項目': 'AI成熟預測數', '結果': len(forecasts)},
+        {'項目': 'TimesFM成熟預測數', '結果': int(timesfm['成熟樣本'].sum()) if not timesfm.empty else 0},
         {'項目': '指標成熟快照數', '結果': len(indicators)},
         {'項目': '判讀原則', '結果': '至少30筆成熟樣本；AI須優於類別基準，方向型指標命中率以55%為初步門檻'},
         {'項目': '期限分工', '結果': '短期趨勢5日；中期／籌碼／量價／風險10日；長期趨勢60日；WHID基本面與估值126日'},
@@ -534,15 +636,14 @@ def build_review(db_path=DB_PATH, minimum_calendar_days=30):
         {'主題': '封存', '說明': '同一市場、股票、訊號日與模型只保留首次預測，後續重跑不覆寫。'},
         {'主題': '成熟', '說明': '訊號日後第10個交易日完成才核對；同日上下雙觸採下行先觸。'},
         {'主題': 'AI', '說明': '比較正確率、平衡正確率、Macro F1、Log Loss、Brier Skill與校準誤差。'},
+        {'主題': 'TimesFM', '說明': '獨立比較10日ATR路徑分類與第10日預測報酬；因沒有三分類機率，不計Log Loss、Brier或機率校準，也不併入AI集成。'},
         {'主題': '分類指標', '說明': '短期趨勢看5日，中期／籌碼／風險看10日，長期趨勢看60日，WHID基本面與估值看126日。'},
         {'主題': '數值指標', '說明': '依指標期限使用Spearman相關及高低四分位報酬差；多重比較結果只作篩選。'},
     ])
-    output_dir = VALIDATION_ROOT / '30日評估' / datetime.now().strftime('%Y/%m')
-    output_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    output = output_dir / f'WHID_30日驗證_{stamp}.xlsx'
+    output = review_output_path()
+    output.parent.mkdir(parents=True, exist_ok=True)
     sheets = {'總覽': overview, '資料涵蓋': coverage, 'AI模型': ai, 'AI校準': calibration,
-              '分類指標': categorical, '數值指標': numeric, '方法': method}
+              'TimesFM驗證': timesfm, '分類指標': categorical, '數值指標': numeric, '方法': method}
     from openpyxl.styles import Font, PatternFill
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         for name, frame in sheets.items():
@@ -556,7 +657,8 @@ def build_review(db_path=DB_PATH, minimum_calendar_days=30):
                 width = min(55, max(12, max(len(str(cell.value or '')) for cell in column) + 2))
                 ws.column_dimensions[column[0].column_letter].width = width
     return {'path': str(output), 'readiness': readiness, 'ai_rows': len(ai),
-            'categorical_rows': len(categorical), 'numeric_rows': len(numeric)}
+            'timesfm_rows': len(timesfm), 'categorical_rows': len(categorical),
+            'numeric_rows': len(numeric)}
 
 
 def status(db_path=DB_PATH):

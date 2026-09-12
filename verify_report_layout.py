@@ -6,6 +6,7 @@ import re
 import sqlite3
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -18,6 +19,7 @@ sys.path.insert(0, str(MODULE_ROOT))
 REPORT_PATTERN = re.compile(
     r"^(TW|US)_20\d{6}_\d{6}_Step[12]_Report\.xlsx$"
 )
+REVIEW_PATTERN = re.compile(r"^WHID_30日驗證_20\d{6}_\d{6}\.xlsx$")
 
 
 def verify_notebooks() -> dict:
@@ -152,9 +154,17 @@ def verify_export_functions() -> dict:
 def verify_existing_layout() -> dict:
     report_root = PROJECT / "reports"
     files = list(report_root.rglob("*.xlsx")) if report_root.exists() else []
-    invalid = [str(path) for path in files if not REPORT_PATTERN.fullmatch(path.name)]
-    nested = [str(path.parent) for path in files
+    review_root = report_root / "30日評估"
+    ordinary = [path for path in files if review_root not in path.parents]
+    reviews = [path for path in files if review_root in path.parents]
+    invalid = [str(path) for path in ordinary if not REPORT_PATTERN.fullmatch(path.name)]
+    invalid.extend(str(path) for path in reviews if not REVIEW_PATTERN.fullmatch(path.name))
+    nested = [str(path.parent) for path in ordinary
               if path.parent.parent.parent != report_root]
+    nested.extend(str(path.parent) for path in reviews
+                  if path.parent.parent.parent != review_root
+                  or not re.fullmatch(r"20\d{2}", path.parent.parent.name)
+                  or not re.fullmatch(r"0[1-9]|1[0-2]", path.parent.name))
     if invalid or nested:
         raise AssertionError({"invalid_names": invalid, "nested_folders": nested})
     old_runtime = MODULE_ROOT / "reports"
@@ -162,7 +172,19 @@ def verify_existing_layout() -> dict:
     old_files = [str(path) for path in old_files if path.is_file()]
     if old_files:
         raise AssertionError({"legacy_runtime_files": old_files})
-    return {"xlsx_files": len(files), "invalid_names": 0, "nested_folders": 0}
+    return {"xlsx_files": len(files), "review_files": len(reviews),
+            "invalid_names": 0, "nested_folders": 0}
+
+
+def verify_review_output() -> dict:
+    from prediction_audit import review_output_path
+
+    expected = PROJECT / "reports" / "30日評估" / "2026" / "09" / \
+        "WHID_30日驗證_20260912_230405.xlsx"
+    actual = review_output_path(datetime(2026, 9, 12, 23, 4, 5))
+    if actual != expected:
+        raise AssertionError({"expected": str(expected), "actual": str(actual)})
+    return {"path": str(actual)}
 
 
 def verify_database() -> dict:
@@ -194,6 +216,7 @@ def main() -> None:
         "notebooks": verify_notebooks(),
         "historical_pe": verify_historical_pe_migration(),
         "export_functions": verify_export_functions(),
+        "review_output": verify_review_output(),
         "existing_layout": verify_existing_layout(),
         "database": verify_database(),
         "status": "ok",

@@ -227,7 +227,7 @@ Windows 執行 Notebook 時可能顯示：
 | 第二階段研究資料 | `system_data/research/TW`、`system_data/research/US` |
 | 每次自動執行紀錄 | `system_data/validation/每日執行紀錄` |
 | 預測驗證資料庫 | `system_data/validation/prediction_audit.sqlite3` |
-| 30 日評估 | `system_data/validation/30日評估/YYYY/MM` |
+| 30 日評估 | `reports/30日評估/YYYY/MM/WHID_30日驗證_YYYYMMDD_HHMMSS.xlsx` |
 
 舊版短線 AI 報表保存在 `system_data/legacy_reports/short_term_ai`，不是目前新版第二階段的正式輸出。
 
