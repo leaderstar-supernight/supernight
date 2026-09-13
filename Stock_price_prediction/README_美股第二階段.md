@@ -71,7 +71,7 @@ TimesFM 3.0 使用[官方非商業授權](https://huggingface.co/google/timesfm-
 
 每次產出兩份 Excel，資料夾完全分開：
 
-- `reports/簡化版/US/US_日期_時間_Step2_Report.xlsx`：保留短、中、長期趨勢、相對SPY動能、同區間最佳模型、時機結論、風險參考價與三分類AI研究機率。
+- `reports/簡化版/US/US_日期_時間_Combined_Report.xlsx`：單一簡化工作簿與單一 `Report` 工作表；每列先顯示WHID基本面估值，後接短、中、長期趨勢、相對SPY動能、同區間最佳模型、時機結論、風險參考價與三分類AI研究機率，重複欄位只保留一份。第二階段成功後，本次Step1簡化暫存檔會移除。
 - `reports/詳細版/US/US_日期_時間_Step2_Report.xlsx`：原始 WHID 欄位加上來源、依據、回測、交易紀錄與 AI 評估。
 - `system_data/research/US/`：設定快照、逐日訊號與可用的樣本外機率。
 - `system_data/cache/US`：公開行情快取，預設 12 小時。

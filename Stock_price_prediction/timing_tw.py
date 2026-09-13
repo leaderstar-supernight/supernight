@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -40,6 +41,39 @@ def _sheet(frame):
     return f
 
 
+def _remove_consumed_step1_simple(provenance, report_root):
+    """Remove only the exact Step-1 simple report consumed by this successful run."""
+    source = Path(str((provenance or {}).get('來源') or ''))
+    if not source.is_absolute():
+        return None
+    expected_parent = (report_root/'簡化版'/'TW').resolve()
+    try:
+        source = source.resolve()
+    except OSError:
+        return None
+    if (source.parent == expected_parent
+            and re.fullmatch(r'TW_20\d{6}_\d{6}_Step1_Report\.xlsx', source.name)
+            and source.is_file()):
+        source.unlink()
+        return str(source)
+    return None
+
+
+def _combined_simple_report(result):
+    """Join Step 1 then Step 2 by ticker, keeping one copy of repeated fields."""
+    step1=result['candidates'].copy()
+    step2=result['simple'].copy()
+    if '代號' not in step1 or '代號' not in step2:
+        raise ValueError('簡化版整合需要Step1與Step2都包含代號')
+    if step1['代號'].duplicated().any() or step2['代號'].duplicated().any():
+        raise ValueError('簡化版整合不能包含重複股票代號')
+    # Step1的現價是基本面估值採用價；同一列不再重複Step2現價。
+    repeated=set(step1.columns).intersection(step2.columns)-{'代號'}
+    if '現價' in step1.columns: repeated.add('現價')
+    step2=step2.drop(columns=[column for column in repeated if column in step2],errors='ignore')
+    return step1.merge(step2,on='代號',how='outer',sort=False,validate='one_to_one')
+
+
 def export_reports(result, cfg):
     now=datetime.now()
     stamp=now.strftime('%Y%m%d_%H%M%S')
@@ -50,8 +84,8 @@ def export_reports(result, cfg):
            '簡化版':report_root/'簡化版'/'TW',
            '研究資料':system_root/'research'/'TW'}
     for p in paths.values(): p.mkdir(parents=True,exist_ok=True)
-    filename=f'{run_id}_Report.xlsx'
-    simple=paths['簡化版']/filename; detailed=paths['詳細版']/filename
+    simple=paths['簡化版']/f'TW_{stamp}_Combined_Report.xlsx'
+    detailed=paths['詳細版']/f'{run_id}_Report.xlsx'
     rules=[{'分類':g,'設定':k,'值':v} for g in ['rules','sentiment','ai','timesfm','backtest'] for k,v in cfg[g].items()]
     rules.extend([
         {'分類':'說明','設定':'趨勢分層','值':'短期5/20/3、中期20/60/5、長期120/240/20；只有中期趨勢參與現行進出場與回測'},
@@ -83,7 +117,8 @@ def export_reports(result, cfg):
         'Candidates':result['candidates']}
     # This is the program's reusable export function, not a change to any existing workbook.
     from openpyxl.styles import Font,PatternFill,Alignment
-    for path,book in [(simple,{'Report':result['simple']}),(detailed,sheets)]:
+    simple_sheets={'Report':_combined_simple_report(result)}
+    for path,book in [(simple,simple_sheets),(detailed,sheets)]:
         with pd.ExcelWriter(path,engine='openpyxl') as writer:
             for name,df in book.items():
                 out=_sheet(df)
@@ -108,7 +143,10 @@ def export_reports(result, cfg):
     result['signals'].to_csv(paths['研究資料']/(run_id+'_signals.csv'),index=False,encoding='utf-8-sig')
     if not result['news'].empty:
         result['news'].to_csv(paths['研究資料']/(run_id+'_news.csv'),index=False,encoding='utf-8-sig')
-    return {'簡化版':str(simple),'詳細版':str(detailed),'快照':str(snapshot)}
+    removed_step1=_remove_consumed_step1_simple(result.get('provenance'), report_root)
+    output={'簡化版':str(simple),'詳細版':str(detailed),'快照':str(snapshot)}
+    if removed_step1: output['已整併並移除Step1簡化版']=removed_step1
+    return output
 
 
 def analyze_bundle(ticker, candidate, raw, adjusted, chips, meta, cfg, provenance, asof, holding=None,

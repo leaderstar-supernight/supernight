@@ -109,6 +109,8 @@ def find_report(project):
     folder=report_root/'簡化版'/'US'
     paths=[p for p in folder.glob('US_*_Step1_Report.xlsx') if not p.name.startswith('~$')]
     if not paths:
+        paths=[p for p in folder.glob('US_*_Combined_Report.xlsx') if not p.name.startswith('~$')]
+    if not paths:
         folder=report_root/'詳細版'/'US'
         paths=[p for p in folder.glob('US_*_Step1_Report.xlsx') if not p.name.startswith('~$')]
     if not paths:raise ValueError('找不到WHID美股報表；請指定report_path或tickers')

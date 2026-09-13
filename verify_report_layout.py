@@ -17,7 +17,7 @@ MODULE_ROOT = PROJECT / "Stock_price_prediction"
 sys.path.insert(0, str(MODULE_ROOT))
 
 REPORT_PATTERN = re.compile(
-    r"^(TW|US)_20\d{6}_\d{6}_Step[12]_Report\.xlsx$"
+    r"^(TW|US)_20\d{6}_\d{6}_(?:Step[12]|Combined)_Report\.xlsx$"
 )
 REVIEW_PATTERN = re.compile(r"^WHID_30日驗證_20\d{6}_\d{6}\.xlsx$")
 
@@ -40,10 +40,21 @@ def verify_notebooks() -> dict:
         ]
         for index, source in enumerate(sources):
             compile(source, f"<{path.name}:cell{index}>", "exec")
+        analyst_order = None
+        if "ReDesgin" in path.name:
+            combined = "\n".join(sources)
+            marker = "TW_SIMPLE_COLUMNS" if "_TW" in path.name else "US_SIMPLE_COLUMNS"
+            simple_block = combined[combined.index(marker):combined.index("def build_simple_report", combined.index(marker))]
+            labels = ["分析師目標價最低", "分析師目標價中位數", "分析師目標價平均", "分析師目標價最高"]
+            positions = [simple_block.index(label) for label in labels]
+            if positions != sorted(positions):
+                raise AssertionError(f"{path.name} 分析師目標價欄位順序錯誤")
+            analyst_order = labels
         result[path.name] = {
             "code_cells": len(sources),
             "step1_naming": ("Step1_Report.xlsx" in "\n".join(sources))
                 if "ReDesgin" in path.name else None,
+            "simple_analyst_order": analyst_order,
         }
     return result
 
@@ -153,10 +164,30 @@ def verify_export_functions() -> dict:
                        "system_root": str(root / "system_data")},
             "rules": {}, "sentiment": {}, "ai": {}, "timesfm": {}, "backtest": {},
         }
-        paths = {
-            "TW": export_tw(_empty_result(), cfg),
-            "US": export_us(_empty_result(), cfg),
-        }
+        paths = {}
+        consumed_sources = {}
+        for market, exporter in (("TW", export_tw), ("US", export_us)):
+            source = root / "reports" / "簡化版" / market / \
+                f"{market}_20260912_200000_Step1_Report.xlsx"
+            source.parent.mkdir(parents=True, exist_ok=True)
+            candidates = pd.DataFrame({
+                "代號": ["TEST"],
+                "現價": [100.0],
+                "分析師目標價最低": [90.0],
+                "分析師目標價中位數": [105.0],
+                "分析師目標價平均": [110.0],
+                "分析師目標價最高": [130.0],
+            })
+            candidates.to_excel(source, sheet_name="Report", index=False)
+            payload = _empty_result()
+            payload["candidates"] = candidates
+            price_column = "現價" if market == "TW" else "分析日收盤價USD"
+            payload["simple"] = pd.DataFrame({
+                "代號": ["TEST"], price_column: [101.0], "短期趨勢": ["偏多"]
+            })
+            payload["provenance"] = {"來源": str(source), "WHID評估日期": "2026-09-12"}
+            paths[market] = exporter(payload, cfg)
+            consumed_sources[market] = source
         result = {}
         for market, market_paths in paths.items():
             for version in ("詳細版", "簡化版"):
@@ -168,6 +199,25 @@ def verify_export_functions() -> dict:
             with pd.ExcelFile(market_paths["詳細版"]) as book:
                 if "TimesFMPath" not in book.sheet_names:
                     raise AssertionError(f"{market} 詳細版缺少TimesFMPath工作表")
+            simple_path = Path(market_paths["簡化版"])
+            if "_Combined_Report.xlsx" not in simple_path.name:
+                raise AssertionError(f"{market} 簡化版不是整合檔：{simple_path.name}")
+            with pd.ExcelFile(simple_path) as book:
+                if book.sheet_names != ["Report"]:
+                    raise AssertionError(f"{market} 簡化版工作表錯誤：{book.sheet_names}")
+                combined = pd.read_excel(book, sheet_name="Report")
+                expected = ["分析師目標價最低", "分析師目標價中位數", "分析師目標價平均", "分析師目標價最高"]
+                actual = [column for column in combined.columns if column in expected]
+                if actual != expected:
+                    raise AssertionError(f"{market} 分析師目標價欄位錯誤：{actual}")
+                if list(combined.columns[:len(candidates.columns)]) != list(candidates.columns):
+                    raise AssertionError(f"{market} Step1欄位未排在前方")
+                if combined.columns[-1] != "短期趨勢" or combined.columns.duplicated().any():
+                    raise AssertionError(f"{market} Step2欄位順序或重複欄位錯誤")
+                if market == "US" and "分析日收盤價USD" in combined.columns:
+                    raise AssertionError("US簡化版重複保留Step2收盤價")
+            if consumed_sources[market].exists():
+                raise AssertionError(f"{market} 本次Step1簡化暫存檔未移除")
             result[market] = market_paths
         return result
 
