@@ -17,7 +17,7 @@ MODULE_ROOT = PROJECT / "Stock_price_prediction"
 sys.path.insert(0, str(MODULE_ROOT))
 
 REPORT_PATTERN = re.compile(
-    r"^(TW|US)_20\d{6}_\d{6}_(?:Step[12]|Combined)_Report\.xlsx$"
+    r"^(TW|US)_20\d{6}_\d{6}_(?:Step[12]|Combined|Summary)_Report\.xlsx$"
 )
 REVIEW_PATTERN = re.compile(r"^WHID_30日驗證_20\d{6}_\d{6}\.xlsx$")
 
@@ -152,8 +152,12 @@ def _empty_result() -> dict:
 
 
 def verify_export_functions() -> dict:
-    from timing_tw import export_reports as export_tw
-    from timing_us import export_reports as export_us
+    from timing_tw import (SUMMARY_COLUMNS as TW_SUMMARY_COLUMNS,
+                           SUMMARY_GROUPS as TW_SUMMARY_GROUPS,
+                           export_reports as export_tw)
+    from timing_us import (SUMMARY_COLUMNS as US_SUMMARY_COLUMNS,
+                           SUMMARY_GROUPS as US_SUMMARY_GROUPS,
+                           export_reports as export_us)
 
     system_parent = PROJECT / "system_data"
     system_parent.mkdir(parents=True, exist_ok=True)
@@ -190,7 +194,7 @@ def verify_export_functions() -> dict:
             consumed_sources[market] = source
         result = {}
         for market, market_paths in paths.items():
-            for version in ("詳細版", "簡化版"):
+            for version in ("詳細版", "簡化版", "摘要"):
                 path = Path(market_paths[version])
                 if not path.exists() or not REPORT_PATTERN.fullmatch(path.name):
                     raise AssertionError(f"{market} {version} 檔名或輸出失敗：{path}")
@@ -216,6 +220,21 @@ def verify_export_functions() -> dict:
                     raise AssertionError(f"{market} Step2欄位順序或重複欄位錯誤")
                 if market == "US" and "分析日收盤價USD" in combined.columns:
                     raise AssertionError("US簡化版重複保留Step2收盤價")
+            summary_columns = TW_SUMMARY_COLUMNS if market == "TW" else US_SUMMARY_COLUMNS
+            summary_groups = TW_SUMMARY_GROUPS if market == "TW" else US_SUMMARY_GROUPS
+            with pd.ExcelFile(market_paths["摘要"]) as book:
+                if book.sheet_names != ["Report"]:
+                    raise AssertionError(f"{market} 摘要工作表錯誤：{book.sheet_names}")
+                summary = pd.read_excel(book, sheet_name="Report", header=1)
+                if list(summary.columns) != summary_columns:
+                    raise AssertionError(f"{market} 摘要欄位或順序錯誤")
+            expected_start = 1
+            for _, start, end, _ in summary_groups:
+                if start != expected_start or end < start:
+                    raise AssertionError(f"{market} 摘要群組範圍不連續")
+                expected_start = end + 1
+            if expected_start != len(summary_columns) + 1:
+                raise AssertionError(f"{market} 摘要群組未完整覆蓋欄位")
             if consumed_sources[market].exists():
                 raise AssertionError(f"{market} 本次Step1簡化暫存檔未移除")
             result[market] = market_paths

@@ -15,6 +15,22 @@ SIMPLE_COLUMNS=['代號','訊號日期NY','分析日收盤價USD','短期趨勢'
  'ATR風險參考價USD','支撐參考USD','壓力參考USD','AI同區間最佳模型','AI上行先觸機率','AI下行先觸機率','AI盤整機率',
  *summary_columns('US'),'AI狀態','資料狀態']
 
+SUMMARY_COLUMNS=['代號','產業','現價','本益比（TTM）','歷史PE百分位_1Y','歷史PE百分位_3Y','歷史PE百分位_5Y',
+ '成長分數','品質分數','巴菲特檢核分數','基本面分數','基本面評價星等','基本面投資評價','價格投資建議','盈餘趨勢評價','現金獲利品質評價','財務安全性評價',
+ '分析師共識（強買/買進/持有/賣出/強賣）','分析師目標價最低','分析師目標價中位數','分析師目標價平均','分析師目標價最高','目標價依據',
+ '營收逐季趨勢','EPS逐季趨勢','OCF逐季趨勢','短期趨勢','中期趨勢','長期趨勢','相對大盤動能',
+ '量價參考','市場環境','市場情緒','個股情緒','新聞情緒',
+ '未持有建議','持有情境建議','ATR風險參考價USD','支撐參考USD','壓力參考USD','AI同區間最佳模型','AI上行先觸機率','AI下行先觸機率','AI盤整機率',
+ 'TimesFM10日路徑判讀','TimesFM第10日預測價USD','TimesFM10日預測漲跌幅','TimesFM預估觸及日']
+
+SUMMARY_GROUPS=[
+ ('股票代號＆產業別',1,2,'1F4E78'),('現價位於歷史PE地位',3,7,'5B9BD5'),
+ ('基本面分析＆買價建議',8,17,'70AD47'),('分析師共識＆建議價格',18,23,'C55A11'),
+ ('最近3季營收、EPS、可操作現金流趨勢',24,26,'8064A2'),('技術分析',27,30,'2F75B5'),
+ ('量價分析＆市場環境／情緒',31,35,'548235'),
+ ('AI模型：未持有／持有情境與10日觸及機率',36,44,'BF9000'),
+ ('時間序模型：股價預測路徑',45,48,'7030A0')]
+
 
 def safe_json(value):
     if isinstance(value,dict): return {str(k):safe_json(v) for k,v in value.items()}
@@ -70,6 +86,42 @@ def _combined_simple_report(result):
     return step1.merge(step2,on='代號',how='outer',sort=False,validate='one_to_one')
 
 
+def _write_summary_report(path, combined):
+    from openpyxl.styles import Alignment,Font,PatternFill
+    from openpyxl.utils import get_column_letter
+    summary=combined.reindex(columns=SUMMARY_COLUMNS).copy()
+    with pd.ExcelWriter(path,engine='openpyxl') as writer:
+        out=_sheet(summary)
+        out.to_excel(writer,sheet_name='Report',index=False,startrow=1)
+        ws=writer.sheets['Report']
+        for title,start,end,color in SUMMARY_GROUPS:
+            ws.merge_cells(start_row=1,start_column=start,end_row=1,end_column=end)
+            cell=ws.cell(1,start,title)
+            cell.font=Font(color='FFFFFF',bold=True,size=11)
+            cell.fill=PatternFill('solid',fgColor=color)
+            cell.alignment=Alignment(horizontal='center',vertical='center',wrap_text=True)
+        for cell in ws[2]:
+            cell.font=Font(color='FFFFFF',bold=True)
+            cell.fill=PatternFill('solid',fgColor='17365D')
+            cell.alignment=Alignment(horizontal='center',vertical='center',wrap_text=True)
+        ws.row_dimensions[1].height=34;ws.row_dimensions[2].height=52
+        ws.freeze_panes='C3'
+        ws.auto_filter.ref=f'A2:{get_column_letter(ws.max_column)}{ws.max_row}'
+        for index,column in enumerate(out.columns,1):
+            width=16
+            if any(word in str(column) for word in ['建議','評價','趨勢','情緒','判讀','模型','共識']): width=22
+            if len(str(column))>=18: width=28
+            ws.column_dimensions[get_column_letter(index)].width=width
+            for cell in ws.iter_cols(min_col=index,max_col=index,min_row=3):
+                for value_cell in cell:
+                    if not isinstance(value_cell.value,(int,float)): continue
+                    if '歷史PE百分位' in str(column): value_cell.number_format='0.0"%"'
+                    elif any(word in str(column) for word in ['機率','漲跌幅']): value_cell.number_format='0.0%'
+                    elif '分數' in str(column): value_cell.number_format='0'
+                    else: value_cell.number_format='#,##0.000'
+    return summary
+
+
 def export_reports(result, cfg):
     now=datetime.now()
     stamp=now.strftime('%Y%m%d_%H%M%S')
@@ -78,9 +130,11 @@ def export_reports(result, cfg):
     system_root=Path(cfg['output']['system_root'])
     paths={'詳細版':report_root/'詳細版'/'US',
            '簡化版':report_root/'簡化版'/'US',
+           '摘要':report_root/'摘要'/'US',
            '研究資料':system_root/'research'/'US'}
     for p in paths.values(): p.mkdir(parents=True,exist_ok=True)
     simple=paths['簡化版']/f'US_{stamp}_Combined_Report.xlsx'
+    summary_path=paths['摘要']/f'US_{stamp}_Summary_Report.xlsx'
     detailed=paths['詳細版']/f'{run_id}_Report.xlsx'
     rules=[{'分類':g,'設定':k,'值':v} for g in ['rules','sentiment','ai','timesfm','backtest'] for k,v in cfg[g].items()]
     rules.extend([
@@ -113,7 +167,8 @@ def export_reports(result, cfg):
         'Candidates':result['candidates']}
     # This is the program's reusable export function, not a change to any existing workbook.
     from openpyxl.styles import Font,PatternFill,Alignment
-    simple_sheets={'Report':_combined_simple_report(result)}
+    combined=_combined_simple_report(result)
+    simple_sheets={'Report':combined}
     for path,book in [(simple,simple_sheets),(detailed,sheets)]:
         with pd.ExcelWriter(path,engine='openpyxl') as writer:
             for name,df in book.items():
@@ -130,6 +185,7 @@ def export_reports(result, cfg):
                     for cell in list(cells)[1:]:
                         if isinstance(cell.value,(int,float)):
                             cell.number_format='0.0%' if any(s in str(col).lower() for s in ['probability','return','drawdown','win_rate','比例','機率','報酬率','乖離','漲跌幅']) else '#,##0.000'
+    _write_summary_report(summary_path,combined)
     snapshot=paths['研究資料']/(run_id+'_snapshot.json')
     snapshot.write_text(json.dumps(safe_json({'version':VERSION,'created_utc':datetime.now(timezone.utc),
         'config':cfg,'provenance':result['provenance'],'rows':result['detail'].to_dict('records')}),ensure_ascii=False,indent=2),encoding='utf-8')
@@ -140,7 +196,7 @@ def export_reports(result, cfg):
     if not result['news'].empty:
         result['news'].to_csv(paths['研究資料']/(run_id+'_news.csv'),index=False,encoding='utf-8-sig')
     removed_step1=_remove_consumed_step1_simple(result.get('provenance'), report_root)
-    output={'簡化版':str(simple),'詳細版':str(detailed),'快照':str(snapshot)}
+    output={'簡化版':str(simple),'摘要':str(summary_path),'詳細版':str(detailed),'快照':str(snapshot)}
     if removed_step1: output['已整併並移除Step1簡化版']=removed_step1
     return output
 

@@ -22,6 +22,7 @@ AI 狀態與未持有建議彼此獨立。簡化版會顯示上行先觸、下�
 一次輸出兩個 Excel，使用同一批資料及唯一時間戳：
 
 - `../reports/簡化版/TW/TW_日期_時間_Combined_Report.xlsx`：單一簡化工作簿與單一 `Report` 工作表；每列先顯示WHID基本面估值，後接短、中、長期趨勢、籌碼K線、市場／個股／新聞情緒及融資壓力，重複欄位只保留一份。第二階段成功後，本次Step1簡化暫存檔會移除。
+- `../reports/摘要/TW/TW_日期_時間_Summary_Report.xlsx`：由Combined再固定選欄，使用兩層表頭將基本面、分析師、營收／EPS／OCF趨勢、技術、籌碼與情緒、AI及TimesFM分組；不重算或改變任何結論。
 - `../reports/詳細版/TW/TW_日期_時間_Step2_Report.xlsx`：原始WHID欄位（前綴WHID_）、規則依據、資料來源、AI測試、AIComparison、AIModelSummary、機率分箱及單檔交易研究。
 - `../system_data/research/TW/`：每日候選／結論快照、逐日訊號及AI樣本外預測。
 
