@@ -13,8 +13,8 @@ import pytest
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "Stock_price_prediction"))
 
-from prediction_audit import (_timesfm_table, _training_dataset, _walk_forward_table,
-                              review_output_path)
+from prediction_audit import (_ai_tables, _indicator_tables, _timesfm_table,
+                              _training_dataset, _walk_forward_table, review_output_path)
 from timing_timesfm import TimesFMPathRunner, _quantile_class_probabilities
 
 
@@ -36,11 +36,12 @@ def test_timesfm_is_evaluated_as_hard_class_and_point_return():
     rows = []
     for index in range(30):
         predicted_return = (index % 5 - 2) / 100
+        signal_date = pd.Timestamp("2026-01-01") + pd.Timedelta(days=index // 3)
         rows.append(
             {
                 "market": "TW",
                 "ticker": f"TEST{index}",
-                "signal_date": "2026-01-01",
+                "signal_date": str(signal_date.date()),
                 "snapshot_json": json.dumps(
                     {
                         "TimesFM10日路徑判讀": labels[index % 3],
@@ -69,6 +70,43 @@ def test_timesfm_is_evaluated_as_hard_class_and_point_return():
     assert result.iloc[0]["10日預測報酬MAE"] == pytest.approx(0.005)
     assert result.iloc[0]["Brier Skill"] > 0
     assert result.iloc[0]["判定"] == "估計機率初步有參考性"
+
+
+def test_ai_monthly_verdict_requires_distinct_signal_dates():
+    rows = []
+    for index in range(30):
+        rows.append({
+            "market": "US", "ticker": f"T{index}",
+            "signal_date": f"2026-01-0{1 + index % 2}", "model": "xgboost",
+            "actual_class": "down_first" if index % 2 else "up_first",
+            "p_down": 0.8 if index % 2 else 0.1,
+            "p_neutral": 0.1,
+            "p_up": 0.1 if index % 2 else 0.8,
+        })
+
+    result, _ = _ai_tables(pd.DataFrame(rows))
+
+    assert result.iloc[0]["獨立訊號日"] == 2
+    assert result.iloc[0]["判定"] == "樣本集中於2個訊號日；暫不調權重"
+
+
+def test_market_level_indicator_counts_each_signal_date_once():
+    rows = []
+    for day in range(2):
+        for ticker in range(20):
+            rows.append({
+                "market": "TW", "ticker": f"T{ticker}",
+                "signal_date": str((pd.Timestamp("2026-01-01") + pd.Timedelta(days=day)).date()),
+                "actual_class": "up_first", "市場情緒": "偏多",
+                "benchmark_return_10": 0.01,
+            })
+
+    categorical, _ = _indicator_tables(pd.DataFrame(), pd.DataFrame(rows))
+
+    row = categorical.iloc[0]
+    assert row["成熟樣本"] == 2
+    assert row["獨立訊號日"] == 2
+    assert row["判定"] == "資料不足"
 
 
 def test_timesfm_unavailable_rows_are_not_counted():

@@ -10,9 +10,10 @@ from timing_us_data import VERSION, Provider, candidates, load_config, number, r
 from timing_us_rules import signals, latest_assessment, compare_strategies, market_sentiment, news_sentiment
 from timing_us_ai import run_ai, summarize_model_metrics
 from timing_timesfm import TimesFMPathRunner, summary_columns
+from timing_decision import DECISION_COLUMNS, apply_shadow_decision
 
 SIMPLE_COLUMNS=['代號','訊號日期NY','分析日收盤價USD','短期趨勢','中期趨勢','長期趨勢','相對大盤動能','量價參考','市場環境','市場情緒','個股情緒','新聞情緒','風險','未持有建議','持有情境建議',
- 'ATR風險參考價USD','支撐參考USD','壓力參考USD','AI同區間最佳模型','AI上行先觸機率','AI下行先觸機率','AI盤整機率',
+ 'ATR風險參考價USD','支撐參考USD','壓力參考USD',*DECISION_COLUMNS,'AI同區間最佳模型','AI上行先觸機率','AI下行先觸機率','AI盤整機率',
  *summary_columns('US'),'AI狀態','資料狀態']
 
 SUMMARY_COLUMNS=['代號','產業','現價','本益比（TTM）','歷史PE百分位_1Y','歷史PE百分位_3Y','歷史PE百分位_5Y',
@@ -20,7 +21,7 @@ SUMMARY_COLUMNS=['代號','產業','現價','本益比（TTM）','歷史PE百分
  '分析師共識（強買/買進/持有/賣出/強賣）','分析師目標價最低','分析師目標價中位數','分析師目標價平均','分析師目標價最高','目標價依據',
  '營收逐季趨勢','EPS逐季趨勢','OCF逐季趨勢','短期趨勢','中期趨勢','長期趨勢','相對大盤動能',
  '量價參考','市場環境','市場情緒','個股情緒','新聞情緒',
- '未持有建議','持有情境建議','ATR風險參考價USD','支撐參考USD','壓力參考USD','AI同區間最佳模型','AI上行先觸機率','AI下行先觸機率','AI盤整機率',
+ '未持有建議','持有情境建議','ATR風險參考價USD','支撐參考USD','壓力參考USD',*DECISION_COLUMNS,'AI同區間最佳模型','AI上行先觸機率','AI下行先觸機率','AI盤整機率',
  'TimesFM10日路徑判讀','TimesFM第10日預測價USD','TimesFM10日預測漲跌幅','TimesFM預估觸及日']
 
 SUMMARY_GROUPS=[
@@ -28,8 +29,9 @@ SUMMARY_GROUPS=[
  ('基本面分析＆買價建議',8,17,'70AD47'),('分析師共識＆建議價格',18,23,'C55A11'),
  ('最近3季營收、EPS、可操作現金流趨勢',24,26,'8064A2'),('技術分析',27,30,'2F75B5'),
  ('量價分析＆市場環境／情緒',31,35,'548235'),
- ('AI模型：未持有／持有情境與10日觸及機率',36,44,'BF9000'),
- ('時間序模型：股價預測路徑',45,48,'7030A0')]
+ ('驗證中決策系統（不改正式建議）',36,41,'7F6000'),
+ ('AI模型：未持有／持有情境與10日觸及機率',42,50,'BF9000'),
+ ('時間序模型：股價預測路徑',51,54,'7030A0')]
 
 
 def safe_json(value):
@@ -331,6 +333,7 @@ def run(config_path='config/timing_US.yaml', provider=None, candidate_frame=None
             buckets['data_status'].append(pd.DataFrame([{'代號':ticker,'錯誤':reason}]))
             if progress: progress(f'{ticker} 未完成：{type(exc).__name__}；已保留失敗列')
     result={k:pd.concat(v,ignore_index=True) if v else pd.DataFrame() for k,v in buckets.items()}
+    result['detail']=apply_shadow_decision(result['detail'],'US',cfg)
     result['ai_model_summary']=summarize_model_metrics(result['ai_metrics'])
     result['simple']=result['detail'].reindex(columns=SIMPLE_COLUMNS)
     result['market_context']=pd.DataFrame([market_summary])

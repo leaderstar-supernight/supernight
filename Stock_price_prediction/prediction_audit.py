@@ -16,6 +16,8 @@ VALIDATION_ROOT = PROJECT / 'system_data' / 'validation'
 DB_PATH = VALIDATION_ROOT / 'prediction_audit.sqlite3'
 REVIEW_ROOT = PROJECT / 'reports' / '30日評估'
 CLASS_ORDER = ['down_first', 'neutral', 'up_first']
+MIN_FIRST_PASS_SAMPLES = 30
+MIN_FIRST_PASS_SIGNAL_DATES = 10
 TIMESFM_CLASS_MAP = {
     '下行先觸': 'down_first',
     '盤整': 'neutral',
@@ -358,6 +360,7 @@ def _ai_tables(frame):
     rows, calibration = [], []
     label_map = {name: i for i, name in enumerate(CLASS_ORDER)}
     for (market, model), group in frame.groupby(['market', 'model']):
+        signal_dates = int(pd.to_datetime(group.signal_date, errors='coerce').nunique())
         y = group.actual_class.map(label_map).to_numpy(dtype=int)
         probability = group[['p_down', 'p_neutral', 'p_up']].to_numpy(dtype=float)
         probability = np.clip(probability, 1e-9, 1)
@@ -370,8 +373,11 @@ def _ai_tables(frame):
         base_brier = float(np.mean(np.sum((base - one_hot) ** 2, axis=1)))
         marginal_error = float(np.mean(np.abs(probability.mean(axis=0) - one_hot.mean(axis=0))))
         macro_f1 = float(f1_score(y, pred, labels=[0, 1, 2], average='macro', zero_division=0))
+        majority_accuracy = float(base_probability.max())
         verdict = '資料不足'
-        if len(y) >= 30:
+        if len(y) >= MIN_FIRST_PASS_SAMPLES and signal_dates < MIN_FIRST_PASS_SIGNAL_DATES:
+            verdict = f'樣本集中於{signal_dates}個訊號日；暫不調權重'
+        elif len(y) >= MIN_FIRST_PASS_SAMPLES:
             skill = 1 - brier / base_brier if base_brier else np.nan
             if skill > 0 and marginal_error <= .10:
                 verdict = '初步有參考性'
@@ -380,9 +386,12 @@ def _ai_tables(frame):
             else:
                 verdict = '未優於基準；需修正'
         rows.append({
-            '市場': market, '模型': model, '成熟樣本': len(y),
+            '市場': market, '模型': model, '成熟樣本': len(y), '獨立訊號日': signal_dates,
             '正確率': float(accuracy_score(y, pred)),
+            '多數類基準正確率': majority_accuracy,
+            '相對基準差': float(accuracy_score(y, pred)) - majority_accuracy,
             '平衡正確率': float(balanced_accuracy_score(y, pred)) if len(np.unique(y)) > 1 else np.nan,
+            '實際盤整比例': float((y == 1).mean()), '預測盤整比例': float((pred == 1).mean()),
             'Macro F1': macro_f1, 'Log Loss': float(log_loss(y, probability, labels=[0, 1, 2])),
             '基準Log Loss': float(log_loss(y, base, labels=[0, 1, 2])),
             'Brier': brier, '基準Brier': base_brier,
@@ -407,7 +416,7 @@ def _ai_tables(frame):
 def _timesfm_table(frame):
     """Evaluate TimesFM point paths and quantile-derived class probabilities."""
     columns = [
-        '市場', '模型', '成熟樣本', '點路徑正確率', '機率成熟樣本',
+        '市場', '模型', '成熟樣本', '獨立訊號日', '點路徑正確率', '機率成熟樣本',
         '機率最高類正確率', '機率平衡正確率', '機率Macro F1',
         '多數類基準正確率', '相對基準差',
         '平衡正確率', 'Macro F1', '下行先觸召回率', '盤整召回率',
@@ -436,6 +445,7 @@ def _timesfm_table(frame):
         records.append({
             'market': outcome.market,
             'model': str(snapshot.get('TimesFM模型') or 'TimesFM'),
+            'signal_date': outcome.get('signal_date'),
             'predicted_class': predicted_class,
             'actual_class': actual_class,
             'predicted_return': _number(snapshot.get('TimesFM10日預測漲跌幅')),
@@ -451,6 +461,7 @@ def _timesfm_table(frame):
     rows = []
     label_map = {name: i for i, name in enumerate(CLASS_ORDER)}
     for (market, model), group in samples.groupby(['market', 'model'], dropna=False):
+        signal_dates = int(pd.to_datetime(group.signal_date, errors='coerce').nunique())
         y = group.actual_class.map(label_map).to_numpy(dtype=int)
         pred = group.predicted_class.map(label_map).to_numpy(dtype=int)
         point_accuracy = float(accuracy_score(y, pred))
@@ -499,7 +510,9 @@ def _timesfm_table(frame):
             skill = 1 - brier / base_brier if base_brier else np.nan
             marginal_error = float(np.mean(np.abs(probability.mean(axis=0) - one_hot.mean(axis=0))))
         verdict = '資料不足'
-        if len(group) >= 30:
+        if len(group) >= MIN_FIRST_PASS_SAMPLES and signal_dates < MIN_FIRST_PASS_SIGNAL_DATES:
+            verdict = f'樣本集中於{signal_dates}個訊號日；暫不調權重'
+        elif len(group) >= MIN_FIRST_PASS_SAMPLES:
             if len(probabilistic) >= 30 and np.isfinite(skill) and skill > 0 and marginal_error <= .10:
                 verdict = '估計機率初步有參考性'
             elif len(probabilistic) >= 30 and np.isfinite(skill) and skill > 0:
@@ -511,7 +524,7 @@ def _timesfm_table(frame):
             else:
                 verdict = '未優於多數類基準；需修正'
         rows.append({
-            '市場': market, '模型': model, '成熟樣本': len(group),
+            '市場': market, '模型': model, '成熟樣本': len(group), '獨立訊號日': signal_dates,
             '點路徑正確率': point_accuracy, '機率成熟樣本': len(probabilistic),
             '機率最高類正確率': probability_accuracy,
             '機率平衡正確率': probability_balanced, '機率Macro F1': probability_f1,
@@ -534,7 +547,9 @@ def _timesfm_table(frame):
 
 def _model_comparison_table(ai, timesfm):
     """Compare models against the same realised path without hiding probability origin."""
-    columns = ['市場', '模型', '類型', '成熟樣本', '正確率', '平衡正確率', 'Macro F1',
+    columns = ['市場', '模型', '類型', '成熟樣本', '獨立訊號日', '正確率',
+               '多數類基準正確率', '相對基準差', '平衡正確率', 'Macro F1',
+               '實際盤整比例', '預測盤整比例',
                'Log Loss', '基準Log Loss', 'Brier', '基準Brier', 'Brier Skill',
                '邊際校準誤差', '判定']
     rows = []
@@ -544,7 +559,10 @@ def _model_comparison_table(ai, timesfm):
         rows.append({
             '市場': row.get('市場'), '模型': row.get('模型'),
             '類型': 'TimesFM分位情境估計機率', '成熟樣本': row.get('機率成熟樣本'),
+            '獨立訊號日': row.get('獨立訊號日'),
             '正確率': row.get('機率最高類正確率'),
+            '多數類基準正確率': row.get('多數類基準正確率'),
+            '相對基準差': row.get('相對基準差'),
             '平衡正確率': row.get('機率平衡正確率'), 'Macro F1': row.get('機率Macro F1'),
             'Log Loss': row.get('Log Loss'), '基準Log Loss': row.get('基準Log Loss'),
             'Brier': row.get('Brier'), '基準Brier': row.get('基準Brier'),
@@ -596,6 +614,28 @@ def _evaluation_target(column):
     return 'return_10', '10交易日'
 
 
+def _independent_signal_dates(frame):
+    if frame.empty or 'signal_date' not in frame:
+        return 0
+    return int(pd.to_datetime(frame.signal_date, errors='coerce').nunique())
+
+
+def _deduplicate_market_target(frame, target):
+    """Market returns are shared by every stock on a date; count each date once."""
+    if frame.empty or not str(target).startswith('benchmark_return_'):
+        return frame
+    return frame.sort_values('signal_date').drop_duplicates('signal_date')
+
+
+def _first_pass_verdict(sample_count, signal_dates, positive, negative, unclear,
+                        positive_label='初步有關聯', negative_label='關聯偏弱／需修正'):
+    if sample_count < MIN_FIRST_PASS_SAMPLES:
+        return '資料不足'
+    if signal_dates < MIN_FIRST_PASS_SIGNAL_DATES:
+        return f'樣本集中於{signal_dates}個訊號日；僅列觀察'
+    return positive_label if positive() else negative_label if negative() else unclear
+
+
 def _rolling_slope(values):
     values = np.asarray(values, dtype=float)
     valid = np.isfinite(values)
@@ -634,6 +674,7 @@ def _training_dataset(frame):
     data['signal_date'] = pd.to_datetime(data.signal_date, errors='coerce')
     data = data.sort_values(['market', 'ticker', 'signal_date']).reset_index(drop=True)
     derived = []
+    derived_values = {}
     for column in number_columns:
         data[column] = pd.to_numeric(data[column], errors='coerce')
         change = f'變化1次｜{column}'
@@ -642,21 +683,29 @@ def _training_dataset(frame):
         own_rank = f'自身百分位20次｜{column}'
         market_rank = f'市場相對百分位｜{column}'
         grouped = data.groupby(['market', 'ticker'], sort=False)[column]
-        data[change] = grouped.diff()
-        data[slope] = grouped.transform(
+        change_values = grouped.diff()
+        slope_values = grouped.transform(
             lambda series: series.rolling(5, min_periods=3).apply(_rolling_slope, raw=True))
-        data[acceleration] = data.groupby(['market', 'ticker'], sort=False)[slope].diff()
-        data[own_rank] = grouped.transform(
+        acceleration_values = slope_values.groupby(
+            [data['market'], data['ticker']], sort=False).diff()
+        own_rank_values = grouped.transform(
             lambda series: series.rolling(20, min_periods=3).apply(_last_percentile, raw=True))
-        data[market_rank] = data.groupby(['market', 'signal_date'])[column].rank(pct=True)
+        market_rank_values = data.groupby(['market', 'signal_date'])[column].rank(pct=True)
+        derived_values.update({
+            change: change_values, slope: slope_values, acceleration: acceleration_values,
+            own_rank: own_rank_values, market_rank: market_rank_values,
+        })
         derived.extend([change, slope, acceleration, own_rank, market_rank])
         industry_column = 'WHID_產業' if 'WHID_產業' in data else ('產業' if '產業' in data else None)
         if industry_column:
             industry_rank = f'產業相對百分位｜{column}'
             industry_group = data.groupby(['market', 'signal_date', industry_column])[column]
-            data[industry_rank] = industry_group.rank(pct=True)
-            data.loc[industry_group.transform('count') < 3, industry_rank] = np.nan
+            industry_rank_values = industry_group.rank(pct=True)
+            industry_rank_values.loc[industry_group.transform('count') < 3] = np.nan
+            derived_values[industry_rank] = industry_rank_values
             derived.append(industry_rank)
+    if derived_values:
+        data = pd.concat([data, pd.DataFrame(derived_values, index=data.index)], axis=1)
     data['signal_date'] = data.signal_date.dt.strftime('%Y-%m-%d')
     return data, number_columns, derived, category_columns
 
@@ -675,25 +724,31 @@ def _derived_numeric_table(training, features):
         for feature in features:
             target, target_label = _feature_target(feature)
             selected = pd.DataFrame({
+                'signal_date': market_frame.signal_date,
                 'value': pd.to_numeric(market_frame[feature], errors='coerce'),
                 'future_return': pd.to_numeric(market_frame[target], errors='coerce'),
             }).dropna()
+            selected = _deduplicate_market_target(selected, target)
+            signal_dates = _independent_signal_dates(selected)
             kind = str(feature).split('｜', 1)[0]
             if len(selected) < 10 or selected.value.nunique() < 3:
                 rows.append({'市場': market, '衍生特徵': feature, '特徵類型': kind,
                              '評估期間': target_label, '成熟樣本': len(selected),
+                             '獨立訊號日': signal_dates,
                              '判定': '資料不足'})
                 continue
             rho, pvalue = spearmanr(selected.value, selected.future_return)
             low = selected.value <= selected.value.quantile(.25)
             high = selected.value >= selected.value.quantile(.75)
             spread = selected.loc[high, 'future_return'].mean() - selected.loc[low, 'future_return'].mean()
-            verdict = '資料不足' if len(selected) < 30 else (
-                '初步有關聯' if abs(rho) >= .15 and pvalue <= .10 else
-                '關聯偏弱／需修正' if abs(rho) < .08 else '尚不明確')
+            verdict = _first_pass_verdict(
+                len(selected), signal_dates,
+                lambda: abs(rho) >= .15 and pvalue <= .10,
+                lambda: abs(rho) < .08,
+                '尚不明確')
             rows.append({
                 '市場': market, '衍生特徵': feature, '特徵類型': kind,
-                '評估期間': target_label, '成熟樣本': len(selected),
+                '評估期間': target_label, '成熟樣本': len(selected), '獨立訊號日': signal_dates,
                 'Spearman相關': rho, 'p值': pvalue,
                 '高低四分位報酬差': spread,
                 '低值組上漲比例': (selected.loc[low, 'future_return'] > 0).mean(),
@@ -752,18 +807,21 @@ def _combination_table(training):
         for (market, value), indexes in pd.DataFrame({
                 'market': training.market, 'value': values}).groupby(['market', 'value']).groups.items():
             selected = training.loc[list(indexes)].dropna(subset=[target])
+            selected = _deduplicate_market_target(selected, target)
             sign = 1 if '偏多' in value else -1 if '偏空' in value else 0
             returns = pd.to_numeric(selected[target], errors='coerce').dropna()
+            signal_dates = _independent_signal_dates(selected)
             directional = returns * sign if sign else pd.Series(dtype=float)
             rows.append({
                 '市場': market, '組合': name, '組合狀態': value, '評估期間': target_label,
-                '成熟樣本': len(returns), '平均報酬': returns.mean(),
+                '成熟樣本': len(returns), '獨立訊號日': signal_dates, '平均報酬': returns.mean(),
                 '上漲比例': (returns > 0).mean() if len(returns) else np.nan,
                 '方向命中率': (directional > 0).mean() if len(directional) else np.nan,
-                '判定': ('資料不足' if len(returns) < 30 else
-                         '初步有決策價值' if len(directional) and (directional > 0).mean() >= .55 else
-                         '方向需修正' if len(directional) and (directional > 0).mean() <= .45 else
-                         '尚不明確'),
+                '判定': _first_pass_verdict(
+                    len(returns), signal_dates,
+                    lambda: len(directional) and (directional > 0).mean() >= .55,
+                    lambda: len(directional) and (directional > 0).mean() <= .45,
+                    '尚不明確', positive_label='初步有決策價值', negative_label='方向需修正'),
             })
     return pd.DataFrame(rows)
 
@@ -775,9 +833,10 @@ def _decision_value_table(training, category_columns):
     for market, market_frame in training.groupby('market'):
         for column in category_columns:
             target, target_label = _evaluation_target(column)
-            values = market_frame[column]
+            working = _deduplicate_market_target(market_frame, target)
+            values = working[column]
             signs = values.map(_expected_sign)
-            future = pd.to_numeric(market_frame[target], errors='coerce')
+            future = pd.to_numeric(working[target], errors='coerce')
             valid = values.notna() & future.notna()
             actionable = valid & (signs != 0)
             if not actionable.any():
@@ -786,20 +845,24 @@ def _decision_value_table(training, category_columns):
             downside = np.nan
             if target == 'return_10':
                 adverse = np.where(signs.loc[actionable] > 0,
-                                   market_frame.loc[actionable, 'max_down_10'],
-                                   -market_frame.loc[actionable, 'max_up_10'])
+                                   working.loc[actionable, 'max_down_10'],
+                                   -working.loc[actionable, 'max_up_10'])
                 downside = pd.to_numeric(pd.Series(adverse), errors='coerce').mean()
             hit_rate = (directional > 0).mean()
+            signal_dates = _independent_signal_dates(working.loc[actionable])
             rows.append({
                 '市場': market, '指標': column, '評估期間': target_label,
                 '有效樣本': int(valid.sum()), '可採取方向樣本': int(actionable.sum()),
+                '獨立訊號日': signal_dates,
                 '訊號覆蓋率': actionable.sum() / valid.sum(),
                 '順訊號平均報酬': directional.mean(), '順訊號中位報酬': directional.median(),
                 '方向命中率': hit_rate, '順訊號報酬10分位': directional.quantile(.10),
                 '10日平均不利波動': downside,
-                '判定': ('資料不足' if actionable.sum() < 30 else
-                         '初步可作決策參考' if hit_rate >= .55 and directional.mean() > 0 else
-                         '方向需修正' if hit_rate <= .45 else '尚不明確'),
+                '判定': _first_pass_verdict(
+                    int(actionable.sum()), signal_dates,
+                    lambda: hit_rate >= .55 and directional.mean() > 0,
+                    lambda: hit_rate <= .45,
+                    '尚不明確', positive_label='初步可作決策參考', negative_label='方向需修正'),
             })
     return pd.DataFrame(rows)
 
@@ -957,7 +1020,7 @@ def _walk_forward_table(training, features, embargo_dates=10):
 
 
 def _indicator_tables(frame, training=None):
-    if frame.empty:
+    if frame.empty and (training is None or training.empty):
         return pd.DataFrame(), pd.DataFrame()
     from scipy.stats import spearmanr
     if training is None:
@@ -971,14 +1034,17 @@ def _indicator_tables(frame, training=None):
                       and '｜' not in str(column)]
     for market, market_frame in training.groupby('market'):
         for column in category_columns:
-            values = market_frame[column]
             target, target_label = _evaluation_target(column)
+            working = _deduplicate_market_target(market_frame, target)
+            values = working[column]
             for value, indexes in values.groupby(values, dropna=True).groups.items():
-                selected = market_frame.loc[list(indexes)].dropna(subset=[target])
+                selected = working.loc[list(indexes)].dropna(subset=[target])
+                signal_dates = _independent_signal_dates(selected)
                 if selected.empty:
                     categorical_rows.append({
                         '市場': market, '指標': column, '分類值': value, '評估期間': target_label,
-                        '預期方向': '尚未判定', '成熟樣本': 0, '判定': f'需累積{target_label}結果',
+                        '預期方向': '尚未判定', '成熟樣本': 0, '獨立訊號日': 0,
+                        '判定': f'需累積{target_label}結果',
                     })
                     continue
                 sign = _expected_sign(value)
@@ -987,8 +1053,10 @@ def _indicator_tables(frame, training=None):
                        (returns < 0) if sign < 0 else pd.Series(dtype=bool))
                 hit_rate = float(hit.mean()) if sign else np.nan
                 verdict = '僅描述／待定義方向'
-                if sign and len(selected) < 30:
+                if sign and len(selected) < MIN_FIRST_PASS_SAMPLES:
                     verdict = '資料不足'
+                elif sign and signal_dates < MIN_FIRST_PASS_SIGNAL_DATES:
+                    verdict = f'樣本集中於{signal_dates}個訊號日；僅列觀察'
                 elif sign and hit_rate >= .55:
                     verdict = '初步可信'
                 elif sign and hit_rate <= .45:
@@ -998,26 +1066,36 @@ def _indicator_tables(frame, training=None):
                 categorical_rows.append({
                     '市場': market, '指標': column, '分類值': value, '評估期間': target_label,
                     '預期方向': '正向' if sign > 0 else '負向' if sign < 0 else '未定義',
-                    '成熟樣本': len(selected), '期間平均報酬': returns.mean(),
+                    '成熟樣本': len(selected), '獨立訊號日': signal_dates,
+                    '期間平均報酬': returns.mean(),
                     '期間上漲比例': (returns > 0).mean(),
                     '方向命中率': hit_rate, '上行先觸率': (selected.actual_class == 'up_first').mean(),
                     '下行先觸率': (selected.actual_class == 'down_first').mean(), '判定': verdict,
                 })
         for column in number_columns:
-            values = pd.to_numeric(market_frame[column], errors='coerce')
             target, target_label = _evaluation_target(column)
-            selected = pd.DataFrame({'value': values, 'future_return': market_frame[target]}).dropna()
+            selected = pd.DataFrame({
+                'signal_date': market_frame.signal_date,
+                'value': pd.to_numeric(market_frame[column], errors='coerce'),
+                'future_return': market_frame[target],
+            }).dropna()
+            selected = _deduplicate_market_target(selected, target)
+            signal_dates = _independent_signal_dates(selected)
             if len(selected) < 10 or selected.value.nunique() < 3:
                 numeric_rows.append({'市場': market, '指標': column, '評估期間': target_label,
-                                     '成熟樣本': len(selected), '判定': f'需累積{target_label}結果'})
+                                     '成熟樣本': len(selected), '獨立訊號日': signal_dates,
+                                     '判定': f'需累積{target_label}結果'})
                 continue
             rho, pvalue = spearmanr(selected.value, selected.future_return)
-            verdict = '資料不足' if len(selected) < 30 else (
-                '初步有關聯' if abs(rho) >= .15 and pvalue <= .10 else
-                '關聯偏弱／需修正' if abs(rho) < .08 else '尚不明確')
+            verdict = _first_pass_verdict(
+                len(selected), signal_dates,
+                lambda: abs(rho) >= .15 and pvalue <= .10,
+                lambda: abs(rho) < .08,
+                '尚不明確')
             numeric_rows.append({
                 '市場': market, '指標': column, '評估期間': target_label,
-                '成熟樣本': len(selected), 'Spearman相關': rho,
+                '成熟樣本': len(selected), '獨立訊號日': signal_dates,
+                'Spearman相關': rho,
                 'p值': pvalue,
                 '低值組期間平均報酬': selected.loc[selected.value <= selected.value.quantile(.25), 'future_return'].mean(),
                 '高值組期間平均報酬': selected.loc[selected.value >= selected.value.quantile(.75), 'future_return'].mean(),
@@ -1032,6 +1110,38 @@ def review_output_path(now=None, root=REVIEW_ROOT):
     return folder / f"WHID_30日驗證_{current.strftime('%Y%m%d_%H%M%S')}.xlsx"
 
 
+def _research_decision_policy(readiness):
+    """Document the current shadow policy in every monthly workbook."""
+    return pd.DataFrame([
+        {'層級': '正式規則', '項目': '原有未持有／持有建議', '目前用途': '維持原樣',
+         '進入決策': '是', '升級條件': '沿用既有第二階段規則', '本期結論': '影子層不得覆寫'},
+        {'層級': '影子確認', '項目': '新聞情緒相對位置', '目前用途': '候選股高低四分位確認',
+         '進入決策': '僅影子分數', '升級條件': '至少30筆、10個獨立訊號日，且方向在多數日期一致',
+         '本期結論': 'TW／US均可繼續觀察'},
+        {'層級': '影子確認', '項目': 'RSI相對位置', '目前用途': '高檔避免追價；低檔僅作反彈觀察',
+         '進入決策': '僅影子分數', '升級條件': '至少30筆、10個獨立訊號日，跨市場狀態仍穩定',
+         '本期結論': '不得解讀成單獨買進訊號'},
+        {'層級': '觀察', '項目': '個股情緒', '目前用途': '顯示警示',
+         '進入決策': '否', '升級條件': '拆解重疊成分後重新驗證',
+         '本期結論': '目前關係不穩定，部分市場呈反向'},
+        {'層級': '風險', '項目': 'ATR比例', '目前用途': '風險與部位提醒',
+         '進入決策': '不作方向分數', '升級條件': '僅校準風險分級與部位，不作看多／看空因子',
+         '本期結論': '高ATR不等於上漲訊號'},
+        {'層級': '模型', '項目': 'AI模型', '目前用途': '顯示三分類機率',
+         '進入決策': '否', '升級條件': '至少30筆、10個獨立訊號日；正確率與Brier均優於基準，且逐日穩定',
+         '本期結論': '尚未通過'},
+        {'層級': '模型', '項目': 'TimesFM', '目前用途': '價格路徑與三分類近似機率',
+         '進入決策': '否', '升級條件': '相同真實結果下穩定優於多數類別與簡單路徑基準',
+         '本期結論': '目前僅參考'},
+        {'層級': '風險否決', '項目': '第二階段風險欄', '目前用途': '阻止影子候選成立',
+         '進入決策': '是', '升級條件': '只要不是「未觸發風險門檻」即否決',
+         '本期結論': '優先於因子分數'},
+        {'層級': '本期狀態', '項目': '資料成熟度', '目前用途': readiness,
+         '進入決策': '影子模式', '升級條件': '各市場至少10個獨立訊號日後重新評估',
+         '本期結論': '不調正式模型權重'},
+    ])
+
+
 def build_review(db_path=DB_PATH, minimum_calendar_days=30, output_root=REVIEW_ROOT, now=None):
     connection = connect(db_path)
     forecasts = pd.read_sql_query(
@@ -1040,7 +1150,8 @@ def build_review(db_path=DB_PATH, minimum_calendar_days=30, output_root=REVIEW_R
         "SELECT * FROM indicators WHERE settlement_status='settled'", connection)
     coverage = pd.read_sql_query('''SELECT market, MIN(signal_date) AS first_signal_date,
         MAX(signal_date) AS last_signal_date, COUNT(*) AS snapshots,
-        SUM(CASE WHEN settlement_status='settled' THEN 1 ELSE 0 END) AS settled
+        SUM(CASE WHEN settlement_status='settled' THEN 1 ELSE 0 END) AS settled,
+        COUNT(DISTINCT CASE WHEN settlement_status='settled' THEN signal_date END) AS settled_signal_dates
         FROM indicators GROUP BY market''', connection)
     connection.close()
     ai, calibration = _ai_tables(forecasts)
@@ -1054,15 +1165,25 @@ def build_review(db_path=DB_PATH, minimum_calendar_days=30, output_root=REVIEW_R
     stability = _stability_table(training, raw_features + derived_features)
     walk_forward = _walk_forward_table(training, raw_features + derived_features)
     span_days = 0
+    minimum_signal_dates = 0
     if not coverage.empty:
         span_days = max((pd.to_datetime(coverage.last_signal_date) - pd.to_datetime(coverage.first_signal_date)).dt.days.max(), 0)
-    readiness = '已達30日，可進行第一輪判讀' if span_days >= minimum_calendar_days else f'累積{span_days}日，尚未達{minimum_calendar_days}日'
+        settled_markets = coverage.loc[coverage.settled > 0]
+        minimum_signal_dates = (int(settled_markets.settled_signal_dates.min())
+                                if not settled_markets.empty else 0)
+    if span_days < minimum_calendar_days:
+        readiness = f'累積{span_days}日，尚未達{minimum_calendar_days}日'
+    elif minimum_signal_dates < MIN_FIRST_PASS_SIGNAL_DATES:
+        readiness = (f'已達{span_days}日，但各市場最少僅{minimum_signal_dates}個獨立訊號日；'
+                     '暫不調整模型或決策權重')
+    else:
+        readiness = '已達30日且獨立訊號日足夠，可進行第一輪判讀'
     overview = pd.DataFrame([
         {'項目': '資料狀態', '結果': readiness},
         {'項目': 'AI成熟預測數', '結果': len(forecasts)},
         {'項目': 'TimesFM成熟預測數', '結果': int(timesfm['成熟樣本'].sum()) if not timesfm.empty else 0},
         {'項目': '指標成熟快照數', '結果': len(indicators)},
-        {'項目': '判讀原則', '結果': '至少30筆成熟樣本；AI須優於類別基準，方向型指標命中率以55%為初步門檻'},
+        {'項目': '判讀原則', '結果': f'至少{MIN_FIRST_PASS_SAMPLES}筆成熟樣本及{MIN_FIRST_PASS_SIGNAL_DATES}個獨立訊號日；AI須優於類別基準，方向型指標命中率以55%為初步門檻'},
         {'項目': '期限分工', '結果': '短期趨勢5日；中期／籌碼／量價／風險10日；長期趨勢60日；WHID基本面與估值126日'},
         {'項目': '進階分析', '結果': '包含指標變化、5次斜率與加速度、自身20次百分位、市場及產業相對百分位、組合效果、跨月穩定性、決策價值與隔離式時間序列樣本外驗證'},
         {'項目': '限制', '結果': '30日只足以初查第二階段；第一階段須等待約6個月，不可用短期漲跌判定'},
@@ -1071,6 +1192,7 @@ def build_review(db_path=DB_PATH, minimum_calendar_days=30, output_root=REVIEW_R
         {'主題': '封存', '說明': '同一市場、股票、訊號日與模型只保留首次預測，後續重跑不覆寫。'},
         {'主題': '成熟', '說明': '訊號日後第10個交易日完成才核對；同日上下雙觸採下行先觸。'},
         {'主題': 'AI', '說明': '比較正確率、平衡正確率、Macro F1、Log Loss、Brier Skill與校準誤差。'},
+        {'主題': '獨立訊號日', '說明': f'同一天多檔股票不可當成跨時間的獨立驗證；第一輪判讀至少需要{MIN_FIRST_PASS_SIGNAL_DATES}個不同訊號日，市場層級指標每個日期只計一次。'},
         {'主題': 'TimesFM', '說明': '以0.1至0.9共9條分位路徑的等權情境占比估算三分類機率，使用同一真實10日ATR路徑計算Log Loss、Brier與校準；此為近似值，不是原生分類機率，也不併入AI集成。'},
         {'主題': '分類指標', '說明': '短期趨勢看5日，中期／籌碼／風險看10日，長期趨勢看60日，WHID基本面與估值看126日。'},
         {'主題': '數值指標', '說明': '依指標期限使用Spearman相關及高低四分位報酬差；多重比較結果只作篩選。'},
@@ -1079,6 +1201,7 @@ def build_review(db_path=DB_PATH, minimum_calendar_days=30, output_root=REVIEW_R
         {'主題': '樣本外驗證', '說明': '依日期切割訓練與測試，中間隔離10個訊號日；至少120筆成熟樣本及30個不同訊號日才執行，特徵篩選僅使用訓練區。'},
         {'主題': '訓練資料', '說明': '訓練資料工作表保存當時可見的原始與衍生特徵及事後標籤；不得使用尚未成熟結果，也不得隨機切割時間序列。'},
     ])
+    decision_policy = _research_decision_policy(readiness)
     output = review_output_path(now=now, root=output_root)
     output.parent.mkdir(parents=True, exist_ok=True)
     sheets = {
@@ -1086,7 +1209,8 @@ def build_review(db_path=DB_PATH, minimum_calendar_days=30, output_root=REVIEW_R
         'AI模型': ai, 'AI校準': calibration, 'TimesFM驗證': timesfm,
         '分類指標': categorical, '數值指標': numeric, '衍生指標': derived,
         '組合效果': combinations, '穩定性': stability, '決策價值': decision_value,
-        '樣本外驗證': walk_forward, '訓練資料': training, '方法': method,
+        '研究決策規則': decision_policy, '樣本外驗證': walk_forward,
+        '訓練資料': training, '方法': method,
     }
     from openpyxl.styles import Font, PatternFill
     with pd.ExcelWriter(output, engine='openpyxl') as writer:

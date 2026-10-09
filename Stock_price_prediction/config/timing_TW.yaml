@@ -85,6 +85,13 @@ timesfm:
   per_core_batch_size: 4
   symmetric_averaging: false
   # 僅預測10日價格路徑；不參與AI集成、規則、評分或交易建議。
+decision:
+  enabled: true
+  mode: shadow
+  min_cross_section_count: 4
+  min_confirm_score: 2
+  # 首份月報有效訊號日不足10日：僅新聞情緒與RSI追價風險計分。
+  # 個股情緒、AI及TimesFM只顯示，不改正式未持有／持有建議。
 backtest:
   enabled: true
   initial_cash: 1000000
