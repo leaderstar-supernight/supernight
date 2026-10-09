@@ -205,6 +205,58 @@ def select_historical_valuation_reference(
     }
 
 
+def calculate_historical_pe_fallback(
+    ttm_eps: float | None,
+    historical_selection: Mapping[str, object] | None,
+) -> dict[str, object]:
+    """Return an auditable historical-PE fallback range using TTM EPS.
+
+    The active historical window is selected separately by
+    :func:`select_historical_valuation_reference`.  This function never blends
+    1Y/3Y/5Y data.  P25/P50/P75 of that one window form the low/base/high PE
+    range.  The result is intended only for price guidance when the forward
+    growth model cannot be used; it never enters the fundamental score.
+    """
+    eps = _finite_positive(ttm_eps)
+    selection = historical_selection if isinstance(historical_selection, Mapping) else {}
+    statistics_for_window = selection.get("statistics")
+    reference_period = selection.get("reference_period")
+
+    unavailable = {
+        "available": False,
+        "reference_period": reference_period,
+        "pe_low": None,
+        "pe_base": None,
+        "pe_high": None,
+        "price_low": None,
+        "price_base": None,
+        "price_high": None,
+        "note": "",
+    }
+    if eps is None:
+        return unavailable | {"note": "缺少正值TTM EPS"}
+    if not isinstance(statistics_for_window, Mapping) or not reference_period:
+        return unavailable | {"note": "缺少可用的3年歷史PE基準"}
+
+    pe_low = _finite_positive(statistics_for_window.get("p25"))
+    pe_base = _finite_positive(statistics_for_window.get("p50"))
+    pe_high = _finite_positive(statistics_for_window.get("p75"))
+    if pe_low is None or pe_base is None or pe_high is None:
+        return unavailable | {"note": f"歷史{reference_period} PE價帶不完整"}
+
+    return {
+        "available": True,
+        "reference_period": reference_period,
+        "pe_low": pe_low,
+        "pe_base": pe_base,
+        "pe_high": pe_high,
+        "price_low": eps * pe_low,
+        "price_base": eps * pe_base,
+        "price_high": eps * pe_high,
+        "note": f"TTM EPS × 歷史{reference_period} PE P25／P50／P75",
+    }
+
+
 def assess_pe_valuation_applicability(
     eps_history: Sequence[float | None] | None,
     current_eps: float | None,
@@ -245,11 +297,10 @@ def calculate_price_recommendation(
     confidence: str,
     reference_period: str | None,
 ) -> dict[str, str | float | None]:
-    """Combine historical position and fair-value upside into separate advice.
+    """Create price advice from fundamental fair-value upside.
 
-    This advice is independent from ``Fundamental Score``.  A cheap historical
-    percentile alone cannot produce a buy recommendation; fair-value upside
-    must confirm it.
+    Historical percentile and reference period are retained only in the text as
+    valuation context.  They never change the recommendation.
     """
     price = _finite_positive(current_price)
     fair = _finite_positive(fair_price)
@@ -257,28 +308,22 @@ def calculate_price_recommendation(
         percentile = float(historical_percentile) if historical_percentile is not None else None
     except (TypeError, ValueError):
         percentile = None
-    if (
-        price is None
-        or fair is None
-        or percentile is None
-        or not math.isfinite(percentile)
-        or reference_period is None
-    ):
+    if price is None or fair is None:
         return {
             "recommendation": "資料不足",
             "confidence": "資料不足",
             "upside": None,
-            "basis": "缺少完整3年估值分布、現價或合理價",
+            "basis": "缺少現價或Fundamental Fair Value",
         }
 
     upside = fair / price - 1.0
-    if percentile <= 15 and upside >= 0.25:
+    if upside >= 0.25:
         recommendation = "強買"
-    elif percentile < 50 and upside >= 0.10:
+    elif upside >= 0.10:
         recommendation = "買進"
-    elif percentile >= 95 and upside <= -0.25:
+    elif upside <= -0.25:
         recommendation = "強賣"
-    elif percentile >= 85 and upside <= -0.10:
+    elif upside <= -0.10:
         recommendation = "賣出"
     else:
         recommendation = "持有"
@@ -292,13 +337,18 @@ def calculate_price_recommendation(
             recommendation = "持有（需檢查盈餘循環）"
         final_confidence = "低"
 
+    historical_context = (
+        f"；歷史{reference_period}估值百分位{percentile:.1f}%僅供參考"
+        if percentile is not None and math.isfinite(percentile) and reference_period
+        else "；歷史估值資料不足，不影響本次價格建議"
+    )
     return {
         "recommendation": recommendation,
         "confidence": final_confidence,
         "upside": upside,
         "basis": (
-            f"{reference_period}估值百分位{percentile:.1f}%；"
-            f"模型合理價上行空間{upside:.1%}；估值適用性：{applicability}"
+            f"Fundamental Fair Value上行空間{upside:.1%}；"
+            f"估值適用性：{applicability}{historical_context}"
         ),
     }
 

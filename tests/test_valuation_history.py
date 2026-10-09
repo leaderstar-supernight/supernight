@@ -1,6 +1,7 @@
 import math
 import json
 import unittest
+from copy import deepcopy
 from pathlib import Path
 
 import pandas as pd
@@ -8,6 +9,7 @@ import pandas as pd
 from valuation_history import (
     assess_pe_valuation_applicability,
     calculate_fundamental_score,
+    calculate_historical_pe_fallback,
     calculate_historical_pe_context,
     calculate_historical_ratio_windows,
     calculate_price_recommendation,
@@ -96,6 +98,28 @@ class HistoricalPEContextTests(unittest.TestCase):
         self.assertIsNone(windows["3y"])
         self.assertIsNone(selected["reference_period"])
 
+    def test_historical_pe_fallback_uses_one_selected_window_and_ttm_eps(self):
+        windows = calculate_historical_ratio_windows(
+            monthly_ratios(60, [20.0] * 60), 15.0, "pe"
+        )
+        selected = select_historical_valuation_reference(windows)
+        fallback = calculate_historical_pe_fallback(2.0, selected)
+
+        self.assertTrue(fallback["available"])
+        self.assertEqual(fallback["reference_period"], "3Y")
+        self.assertEqual(fallback["pe_low"], 20.0)
+        self.assertEqual(fallback["pe_base"], 20.0)
+        self.assertEqual(fallback["pe_high"], 20.0)
+        self.assertEqual(fallback["price_base"], 40.0)
+
+    def test_historical_pe_fallback_does_not_use_short_history(self):
+        windows = calculate_historical_ratio_windows(monthly_ratios(29), 20.0, "pe")
+        selected = select_historical_valuation_reference(windows)
+        fallback = calculate_historical_pe_fallback(2.0, selected)
+
+        self.assertFalse(fallback["available"])
+        self.assertIsNone(fallback["price_base"])
+
     def test_low_historical_percentile_alone_cannot_produce_buy(self):
         advice = calculate_price_recommendation(
             current_price=100.0,
@@ -107,7 +131,7 @@ class HistoricalPEContextTests(unittest.TestCase):
         )
         self.assertEqual(advice["recommendation"], "持有")
 
-    def test_price_recommendation_requires_percentile_and_upside_confirmation(self):
+    def test_price_recommendation_uses_fair_value_not_historical_percentile(self):
         strong_buy = calculate_price_recommendation(
             current_price=100.0,
             fair_price=140.0,
@@ -126,6 +150,16 @@ class HistoricalPEContextTests(unittest.TestCase):
         )
         self.assertEqual(strong_buy["recommendation"], "強買")
         self.assertEqual(strong_sell["recommendation"], "強賣")
+        no_history = calculate_price_recommendation(
+            current_price=100.0,
+            fair_price=140.0,
+            historical_percentile=None,
+            applicability="正常",
+            confidence="高",
+            reference_period=None,
+        )
+        self.assertEqual(no_history["recommendation"], "強買")
+        self.assertIn("僅供參考", strong_buy["basis"])
 
     def test_volatile_eps_downgrades_a_bullish_price_signal(self):
         applicability = assess_pe_valuation_applicability([10, 2, 12, 1, 8], 10)
@@ -188,6 +222,11 @@ class HistoricalPEContextTests(unittest.TestCase):
                 forward_eps=2.0,
                 book_value_per_share=10.0,
                 financial_history={"eps": [1.0, 1.0, 1.0, 1.0, 1.0]},
+                cashflow_quality={
+                    "fcf_margin_ttm": 0.15,
+                    "ocf_to_net_income": 1.0,
+                    "fcf_positive_streak": 4,
+                },
             )
             prices = pd.DataFrame(
                 {"Close": range(1, 61)},
@@ -201,6 +240,11 @@ class HistoricalPEContextTests(unittest.TestCase):
                 snapshot, prices, fundamentals
             )
             score = namespace["ScoringEngine"](config).total_score(80, 60, 50)
+            quality = namespace["QualityMetrics"](
+                roic=0.20,
+                fcf_margin=0.15,
+                eps_cagr_3y=0.30,
+            )
             target = namespace["PriceTargetEngine"]().calculate(
                 snapshot,
                 {
@@ -211,6 +255,8 @@ class HistoricalPEContextTests(unittest.TestCase):
                     }
                 },
                 valuation,
+                quality,
+                50.0,
             )
 
             self.assertEqual(valuation.historical_pe_median_1y, 54.5)
@@ -221,23 +267,58 @@ class HistoricalPEContextTests(unittest.TestCase):
             self.assertEqual(target.historical_median_price_1y, 54.5)
             self.assertEqual(target.historical_median_price_3y, 42.5)
             self.assertEqual(target.historical_median_price_5y, 30.5)
-            expected_estimated_eps = 1.5 if notebook_name.endswith("TW.ipynb") else 2.0
-            expected_model_eps = (1.0 + expected_estimated_eps) / 2
-            self.assertEqual(target.model_fair_price, 54.5 * expected_model_eps)
+            expected_estimated_eps = 2.0
+            expected_model_eps = 0.70 * 1.0 + 0.30 * expected_estimated_eps
+            self.assertEqual(target.fundamental_fair_pe_base, 27.0)
+            self.assertEqual(target.model_fair_price, 27.0 * expected_model_eps)
             self.assertEqual(target.valuation_eps_base, expected_model_eps)
-            self.assertEqual(target.ttm_eps_fair_price, 54.5)
+            self.assertEqual(target.ttm_eps_fair_price, 27.0)
             self.assertEqual(
                 target.estimated_eps_fair_price,
-                54.5 * expected_estimated_eps,
+                27.0 * expected_estimated_eps,
             )
-            self.assertIn("50%", target.model_earnings_basis)
-            self.assertEqual(target.price_recommendation, "強買")
+            self.assertIn("Forward EPS 30%", target.model_earnings_basis)
+            self.assertIn("TTM EPS 70%", target.model_earnings_basis)
+            self.assertEqual(target.price_recommendation, "買進（研究參考）")
+            self.assertEqual(target.valuation_model_version, "Fundamental-Fair-Value-V2-Research")
 
-            estimate_attribute = (
-                "eps_ttm_nowcast" if notebook_name.endswith("TW.ipynb") else "forward_eps"
+            changed_history = deepcopy(valuation)
+            for window in changed_history.historical_pe_window_stats.values():
+                if isinstance(window, dict):
+                    for key in ("p05", "p25", "p50", "p75", "p95"):
+                        window[key] = 5.0
+            changed_target = namespace["PriceTargetEngine"]().calculate(
+                snapshot,
+                {"valuation": {"primary_metric": "pe", "pe_cheap": 10.0, "pe_expensive": 60.0}},
+                changed_history,
+                quality,
+                50.0,
             )
-            original_estimate = getattr(snapshot, estimate_attribute)
-            setattr(snapshot, estimate_attribute, None)
+            self.assertEqual(changed_target.model_fair_price, target.model_fair_price)
+            self.assertEqual(changed_target.fundamental_fair_pe_base, target.fundamental_fair_pe_base)
+
+            special_target = namespace["PriceTargetEngine"]().calculate(
+                snapshot,
+                {
+                    "valuation": {
+                        "primary_metric": "pe",
+                        "pe_cheap": 10.0,
+                        "pe_expensive": 20.0,
+                        "fundamental_growth_pe_enabled": False,
+                    }
+                },
+                valuation,
+                quality,
+                50.0,
+            )
+            self.assertEqual(special_target.model_fair_price, 15.0 * expected_model_eps)
+            self.assertIsNone(special_target.fundamental_fair_pe_base)
+            self.assertEqual(special_target.valuation_model_status, "特殊產業規則")
+
+            original_forward = snapshot.forward_eps
+            original_nowcast = snapshot.eps_ttm_nowcast
+            snapshot.forward_eps = None
+            snapshot.eps_ttm_nowcast = None
             missing_estimate_target = namespace["PriceTargetEngine"]().calculate(
                 snapshot,
                 {
@@ -248,11 +329,37 @@ class HistoricalPEContextTests(unittest.TestCase):
                     }
                 },
                 valuation,
+                quality,
+                50.0,
             )
             self.assertEqual(missing_estimate_target.model_fair_price, 54.5)
             self.assertIn("TTM EPS 100%", missing_estimate_target.model_earnings_basis)
             self.assertEqual(missing_estimate_target.price_recommendation_confidence, "低")
-            setattr(snapshot, estimate_attribute, original_estimate)
+            self.assertEqual(missing_estimate_target.valuation_model_status, "歷史PE備援")
+            self.assertEqual(missing_estimate_target.price_recommendation, "買進（研究參考）")
+            self.assertIn("歷史1Y", missing_estimate_target.valuation_model_note)
+            snapshot.forward_eps = original_forward
+            snapshot.eps_ttm_nowcast = original_nowcast
+
+            snapshot.forward_eps = 0.8
+            negative_forward_target = namespace["PriceTargetEngine"]().calculate(
+                snapshot,
+                {
+                    "valuation": {
+                        "primary_metric": "pe",
+                        "pe_cheap": 10.0,
+                        "pe_expensive": 60.0,
+                    }
+                },
+                valuation,
+                quality,
+                50.0,
+            )
+            self.assertEqual(negative_forward_target.valuation_model_status, "歷史PE備援")
+            self.assertEqual(negative_forward_target.model_fair_price, 54.5)
+            self.assertIsNone(negative_forward_target.estimated_eps_fair_price)
+            self.assertIn("不採用不合理Forward EPS", negative_forward_target.basis)
+            snapshot.forward_eps = original_forward
 
             short_prices = pd.DataFrame(
                 {"Close": range(1, 30)},
@@ -271,11 +378,13 @@ class HistoricalPEContextTests(unittest.TestCase):
                     }
                 },
                 short_valuation,
+                quality,
+                50.0,
             )
             self.assertIsNone(short_target.historical_reference_period)
             self.assertIsNone(short_target.historical_fair_price)
-            self.assertEqual(short_target.model_fair_price, 20.0 * expected_model_eps)
-            self.assertEqual(short_target.price_recommendation, "資料不足")
+            self.assertEqual(short_target.model_fair_price, 27.0 * expected_model_eps)
+            self.assertEqual(short_target.price_recommendation, "買進（研究參考）")
 
 
 if __name__ == "__main__":

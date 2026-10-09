@@ -125,6 +125,56 @@ def verify_historical_pe_migration() -> dict:
     return result
 
 
+def verify_fundamental_fair_value_migration() -> dict:
+    files = [
+        PROJECT / "Stock_Valuation_ReDesgin_TW.ipynb",
+        PROJECT / "Stock_Valuation_ReDesgin_US.ipynb",
+    ]
+    required = {
+        "calculate_fundamental_fair_value_v2",
+        "calculate_historical_pe_fallback",
+        "valuation_model_version",
+        "normalized_forward_eps_growth",
+        "forward_eps_weight",
+        "quality_pe_adjustment",
+        "forecast_risk_penalty",
+        "fundamental_fair_pe_unclipped",
+        "forward_eps_growth",
+        "adjusted_3y_eps_cagr",
+        "sustainable_eps_growth",
+        "earnings_trend_multiplier",
+        "valuation_quality_peg",
+        "fundamental_fair_pe_low",
+        "fundamental_fair_pe_base",
+        "fundamental_fair_pe_high",
+        "model_eps_weight_basis",
+        "fundamental_value_low",
+        "fundamental_value_base",
+        "fundamental_value_high",
+        "valuation_model_status",
+        "valuation_model_note",
+        "歷史PE備援",
+        "analyst target prices are independent reference only",
+    }
+    forbidden = ("TTM EPS 50%", "0.50 * ttm_earnings_base")
+    result = {}
+    for path in files:
+        notebook = json.loads(path.read_text(encoding="utf-8"))
+        source = "\n".join(
+            "".join(cell.get("source", []))
+            for cell in notebook["cells"]
+            if cell.get("cell_type") == "code"
+        )
+        missing = sorted(name for name in required if name not in source)
+        legacy = sorted(value for value in forbidden if value in source)
+        if missing or legacy:
+            raise AssertionError({"notebook": path.name, "missing": missing, "legacy": legacy})
+        if "Fundamental-Fair-Value-V2-Research" not in source:
+            raise AssertionError(f"{path.name} 未標示為V2研究版")
+        result[path.name] = {"required_fields": len(required), "legacy_eps_weighting": 0}
+    return result
+
+
 def _empty_result() -> dict:
     frame = pd.DataFrame({"代號": ["TEST"]})
     empty = pd.DataFrame()
@@ -305,6 +355,7 @@ def main() -> None:
     result = {
         "notebooks": verify_notebooks(),
         "historical_pe": verify_historical_pe_migration(),
+        "fundamental_fair_value": verify_fundamental_fair_value_migration(),
         "export_functions": verify_export_functions(),
         "review_output": verify_review_output(),
         "existing_layout": verify_existing_layout(),
